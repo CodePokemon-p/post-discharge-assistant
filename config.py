@@ -3,19 +3,26 @@ from dotenv import load_dotenv
 
 load_dotenv()  # reads the .env file in your project root, if present
 
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")  # "anthropic" | "groq"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
 def require_api_key():
     """
-    Call this at the top of any node that will make a REAL Claude call.
-    This keeps the mock pipeline runnable with zero key (like right now),
-    but fails immediately with a clear message the moment a real node
-    tries to run without one -- instead of a confusing error from deep
-    inside the Anthropic SDK.
+    Call this at the top of any node that will make a REAL LLM call.
+    Only checks the key that the ACTIVE provider actually needs -- so
+    testing with LLM_PROVIDER=groq never demands an Anthropic key, and
+    vice versa. Fails immediately with a clear message instead of a
+    confusing error from deep inside an SDK.
     """
-    if not ANTHROPIC_API_KEY:
+    if LLM_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. Copy .env.example to .env and "
-            "add your real key before running real Claude calls."
+            "LLM_PROVIDER is 'anthropic' but ANTHROPIC_API_KEY is not set. "
+            "Add it to your .env file."
+        )
+    if LLM_PROVIDER == "groq" and not GROQ_API_KEY:
+        raise RuntimeError(
+            "LLM_PROVIDER is 'groq' but GROQ_API_KEY is not set. "
+            "Add it to your .env file."
         )

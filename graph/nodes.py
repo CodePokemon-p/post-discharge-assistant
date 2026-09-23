@@ -14,15 +14,17 @@ from graph.schemas import CarePlan, Medication
 
 
 def extract_care_plan(state: dict) -> dict:
-    print("[extract_care_plan] Reading discharge summary...")
-    mock_plan = CarePlan(
-        diagnosis="Post knee-surgery recovery",
-        medications=[Medication(name="Ibuprofen", schedule="every 8 hours")],
-        follow_up_date="2026-10-05",
-        red_flags=["fever", "severe swelling", "pain above 8/10"],
-    )
-    return {"care_plan": mock_plan}
+    """
+    REAL VERSION (now): sends the discharge summary to the configured LLM
+    provider and returns a validated CarePlan object.
 
+    The provider (Groq today, Claude tomorrow) is controlled entirely by
+    the LLM_PROVIDER env var -- this function doesn't know or care which.
+    """
+    print("[extract_care_plan] Reading discharge summary...")
+    from graph.extraction import extract_care_plan_real
+    real_plan = extract_care_plan_real(state["discharge_text"])
+    return {"care_plan": real_plan}
 
 def classify_intent(state: dict) -> dict:
     """
@@ -54,12 +56,10 @@ def answer_question(state: dict) -> dict:
 
 
 def triage_symptom(state: dict) -> dict:
-    msg = state["patient_message"].lower()
-    red_flags = state["care_plan"].red_flags     # was: state["care_plan"].get("red_flags", [])
-    high_risk = any(flag.split()[0] in msg for flag in red_flags)
-    risk = "high" if high_risk else "low"
-    print(f"[triage_symptom] risk_level = {risk}")
-    return {"risk_level": risk}
+    print("[triage_symptom] Assessing symptom risk...")
+    from graph.triage import triage_symptom_real
+    result = triage_symptom_real(state["patient_message"], state["care_plan"])
+    return {"risk_level": result.risk_level, "triage_reasoning": result.reasoning}
 
 
 def escalate(state: dict) -> dict:
