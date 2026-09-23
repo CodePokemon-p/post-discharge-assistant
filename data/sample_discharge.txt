@@ -1,0 +1,28 @@
+DISCHARGE SUMMARY
+
+Patient: [REDACTED - sample data]
+Age: 47
+Procedure: Total knee replacement (right knee), performed 2026-09-20
+
+Diagnosis: Post-operative recovery, right total knee arthroplasty.
+
+Medications on discharge:
+- Ibuprofen 400mg, every 8 hours, with food, for pain and swelling
+- Amoxicillin 500mg, every 12 hours for 5 days, to prevent infection
+- Enoxaparin (Lovenox) 40mg, once daily for 10 days, to prevent blood clots
+
+Follow-up: Return to orthopedic clinic on 2026-10-05 for wound check
+and X-ray. Physical therapy to begin 2026-09-27, twice weekly.
+
+Home care instructions:
+- Keep incision site clean and dry; change dressing daily
+- Use crutches or walker for first 2 weeks, weight-bear as tolerated
+- Ice the knee 15-20 minutes, 3-4 times daily
+- Elevate the leg above heart level when resting
+
+Watch for and report immediately if you experience:
+- Fever above 101F (38.3C)
+- Increasing redness, warmth, or drainage from the incision
+- Swelling that suddenly worsens or calf pain (possible blood clot)
+- Chest pain or shortness of breath
+- Pain not controlled by prescribed medication
