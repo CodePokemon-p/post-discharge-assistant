@@ -12,6 +12,7 @@ class DischargeState (TypedDict, total=False):
     discharge_text: str  # raw discharge summary text(input)
     care_plan: CarePlan  # structured, validated care plan (was: dict)
     patient_message: str # latest message from patient input
+    triage_reasoning: Optional[str]   # why triage_symptom made its risk_level call
 
 
     language: Literal["en","ur",] # patient preferred language.
