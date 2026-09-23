@@ -25,6 +25,11 @@ def route_by_risk(state: DischargeState) -> str:
     return "escalate" if state["risk_level"] == "high" else "log_normal"
 
 
+def route_by_groundedness(state: DischargeState) -> str:
+    """Conditional edge after answer_question -- an ungrounded answer escalates too."""
+    return "end" if state.get("grounded", True) else "escalate"
+
+
 def build_graph():
     graph = StateGraph(DischargeState)
 
@@ -40,7 +45,7 @@ def build_graph():
     graph.set_entry_point("extract_care_plan")
     graph.add_edge("extract_care_plan", "classify_intent")
 
-    # Branch 1: question vs symptom report (this is diagram 2's first split)
+    # Branch 1: question vs symptom report (diagram 2's first split)
     graph.add_conditional_edges(
         "classify_intent",
         route_by_intent,
@@ -50,7 +55,7 @@ def build_graph():
         },
     )
 
-    # Branch 2: escalate vs log normal (this is diagram 2's second split)
+    # Branch 2: escalate vs log normal (diagram 2's second split)
     graph.add_conditional_edges(
         "triage_symptom",
         route_by_risk,
@@ -60,8 +65,18 @@ def build_graph():
         },
     )
 
-    # All paths eventually end the graph run
-    graph.add_edge("answer_question", END)
+    # Branch 3: grounded answers end the run; ungrounded ones escalate.
+    # This is the "escalate when unsure" requirement from the client brief.
+    graph.add_conditional_edges(
+        "answer_question",
+        route_by_groundedness,
+        {
+            "end": END,
+            "escalate": "escalate",
+        },
+    )
+
+    # The two endpoint nodes still end normally.
     graph.add_edge("escalate", END)
     graph.add_edge("log_normal", END)
 
