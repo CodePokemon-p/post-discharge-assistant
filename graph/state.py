@@ -1,4 +1,6 @@
 from typing import TypedDict, Optional, Literal
+from graph.schemas import CarePlan
+            
 
 class DischargeState (TypedDict, total=False):
     """ 
@@ -8,7 +10,7 @@ class DischargeState (TypedDict, total=False):
     """
 
     discharge_text: str  # raw discharge summary text(input)
-    care_plan: dict  # structured care plan extracted from discharge txt
+    care_plan: CarePlan  # structured, validated care plan (was: dict)
     patient_message: str # latest message from patient input
 
 
@@ -20,3 +22,5 @@ class DischargeState (TypedDict, total=False):
 
     risk_level: Optional[Literal["low", "high"]] # set if intent == syptoms_report.
     escalated: bool # true if this turn was sent to nurse dashboard.
+
+    

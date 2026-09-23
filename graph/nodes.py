@@ -9,23 +9,18 @@ wiring (the edges and branches) is correct, before any API key exists.
 Each docstring says exactly what real logic will replace the mock later.
 """
 
+from graph.schemas import CarePlan, Medication
+
+
 
 def extract_care_plan(state: dict) -> dict:
-    """
-    REAL VERSION (later): send discharge_text to Claude with a strict JSON
-    schema prompt -> diagnosis, medications+schedule, follow-up date,
-    red-flag symptoms for THIS diagnosis.
-
-    MOCK VERSION (now): returns a fixed plan so downstream nodes have
-    something real to work with.
-    """
     print("[extract_care_plan] Reading discharge summary...")
-    mock_plan = {
-        "diagnosis": "Post knee-surgery recovery",
-        "medications": [{"name": "Ibuprofen", "schedule": "every 8 hours"}],
-        "follow_up_date": "2026-10-05",
-        "red_flags": ["fever", "severe swelling", "pain above 8/10"],
-    }
+    mock_plan = CarePlan(
+        diagnosis="Post knee-surgery recovery",
+        medications=[Medication(name="Ibuprofen", schedule="every 8 hours")],
+        follow_up_date="2026-10-05",
+        red_flags=["fever", "severe swelling", "pain above 8/10"],
+    )
     return {"care_plan": mock_plan}
 
 
@@ -59,16 +54,8 @@ def answer_question(state: dict) -> dict:
 
 
 def triage_symptom(state: dict) -> dict:
-    """
-    REAL VERSION (later): hybrid check -- rule-based thresholds (e.g. pain
-    > 8/10, fever > 101F) combined with an LLM judgment call for nuance,
-    compared against care_plan['red_flags'].
-
-    MOCK VERSION (now): if the message mentions one of the mock red flags,
-    call it high risk.
-    """
     msg = state["patient_message"].lower()
-    red_flags = state["care_plan"].get("red_flags", [])
+    red_flags = state["care_plan"].red_flags     # was: state["care_plan"].get("red_flags", [])
     high_risk = any(flag.split()[0] in msg for flag in red_flags)
     risk = "high" if high_risk else "low"
     print(f"[triage_symptom] risk_level = {risk}")
