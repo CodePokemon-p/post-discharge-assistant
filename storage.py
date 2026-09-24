@@ -1,22 +1,12 @@
 """
-Minimal persistence layer: patient care plans + a log of every check-in
-message, backed by SQLite. This is deliberately simple (no ORM, raw
-sqlite3) -- the goal is a real, working data layer today, not premature
-infrastructure. If this grows into a multi-user production system,
-swapping SQLite for Postgres later means rewriting only this one file,
-since nothing outside it should ever import sqlite3 directly.
-
-WHY THIS EXISTS:
-Without it, the graph is a stateless function -- call it once, get an
-answer, forget everything. A real post-discharge assistant needs to
-know "this is patient #1042, here's their care plan from three days
-ago" on every new message, and needs a durable record of every
-escalation for the nurse dashboard to read from tomorrow.
+Persistence layer: patient care plans + a log of every check-in message,
+backed by SQLite. Extended today with phone_number (the scheduler needs
+to know who to actually message) and get_all_patients() (so the
+scheduler can loop over every patient with a saved care plan).
 """
 
 import json
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +24,7 @@ def init_db() -> None:
             patient_id TEXT PRIMARY KEY,
             care_plan_json TEXT NOT NULL,
             language TEXT NOT NULL DEFAULT 'en',
+            phone_number TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -55,11 +46,26 @@ def init_db() -> None:
     conn.close()
 
 
-def save_care_plan(patient_id: str, care_plan: CarePlan, language: str = "en") -> None:
+def save_care_plan(
+    patient_id: str,
+    care_plan: CarePlan,
+    language: str = "en",
+    phone_number: Optional[str] = None,
+) -> None:
     conn = sqlite3.connect(DB_PATH)
+    # Preserve an existing phone_number if this call doesn't provide one
+    # (e.g. extract_care_plan re-saving a plan shouldn't erase a number
+    # set earlier).
+    if phone_number is None:
+        existing = conn.execute(
+            "SELECT phone_number FROM patients WHERE patient_id = ?", (patient_id,)
+        ).fetchone()
+        phone_number = existing[0] if existing else None
+
     conn.execute(
-        "INSERT OR REPLACE INTO patients (patient_id, care_plan_json, language) VALUES (?, ?, ?)",
-        (patient_id, care_plan.model_dump_json(), language),
+        "INSERT OR REPLACE INTO patients (patient_id, care_plan_json, language, phone_number) "
+        "VALUES (?, ?, ?, ?)",
+        (patient_id, care_plan.model_dump_json(), language, phone_number),
     )
     conn.commit()
     conn.close()
@@ -76,6 +82,23 @@ def get_care_plan(patient_id: str) -> Optional[CarePlan]:
     return CarePlan(**json.loads(row[0]))
 
 
+def get_all_patients() -> list[dict]:
+    """
+    Every patient with a saved care plan -- what the scheduler loops
+    over to send daily check-ins.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM patients").fetchall()
+    conn.close()
+    results = []
+    for row in rows:
+        d = dict(row)
+        d["care_plan"] = CarePlan(**json.loads(d.pop("care_plan_json")))
+        results.append(d)
+    return results
+
+
 def log_message(
     patient_id: str,
     content: str,
@@ -85,11 +108,6 @@ def log_message(
     escalated: bool = False,
     reasoning: Optional[str] = None,
 ) -> None:
-    """
-    Records one patient check-in and everything the graph decided about
-    it. This is the record a nurse dashboard reads from -- every field
-    here should be something a nurse would actually want to see.
-    """
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """INSERT INTO messages
@@ -102,7 +120,7 @@ def log_message(
 
 
 def get_escalations() -> list[dict]:
-    """All escalated messages, newest first -- this IS tomorrow's nurse dashboard data source."""
+    """All escalated messages, newest first -- tomorrow's nurse dashboard data source."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(

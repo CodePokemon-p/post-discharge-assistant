@@ -18,7 +18,12 @@ def extract_care_plan(state: dict) -> dict:
     from storage import save_care_plan
 
     real_plan = extract_care_plan_real(state["discharge_text"])
-    save_care_plan(state["patient_id"], real_plan, language=state.get("language", "en"))
+    save_care_plan(
+        state["patient_id"],
+        real_plan,
+        language=state.get("language", "en"),
+        phone_number=state.get("phone_number"),
+    )
     return {"care_plan": real_plan}
 
 
