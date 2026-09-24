@@ -12,11 +12,7 @@ from graph.nodes import (
 
 
 def route_by_intent(state: DischargeState) -> str:
-    """
-    Conditional edge after classify_intent.
-    LangGraph calls this with the current state and expects back the NAME
-    of the next node to run.
-    """
+    """Conditional edge after classify_intent."""
     return "answer_question" if state["intent"] == "question" else "triage_symptom"
 
 
@@ -33,7 +29,6 @@ def route_by_groundedness(state: DischargeState) -> str:
 def build_graph():
     graph = StateGraph(DischargeState)
 
-    # Register every node
     graph.add_node("extract_care_plan", extract_care_plan)
     graph.add_node("classify_intent", classify_intent)
     graph.add_node("answer_question", answer_question)
@@ -41,11 +36,9 @@ def build_graph():
     graph.add_node("escalate", escalate)
     graph.add_node("log_normal", log_normal)
 
-    # Entry point: every run starts by extracting the care plan
     graph.set_entry_point("extract_care_plan")
     graph.add_edge("extract_care_plan", "classify_intent")
 
-    # Branch 1: question vs symptom report (diagram 2's first split)
     graph.add_conditional_edges(
         "classify_intent",
         route_by_intent,
@@ -55,7 +48,6 @@ def build_graph():
         },
     )
 
-    # Branch 2: escalate vs log normal (diagram 2's second split)
     graph.add_conditional_edges(
         "triage_symptom",
         route_by_risk,
@@ -65,8 +57,6 @@ def build_graph():
         },
     )
 
-    # Branch 3: grounded answers end the run; ungrounded ones escalate.
-    # This is the "escalate when unsure" requirement from the client brief.
     graph.add_conditional_edges(
         "answer_question",
         route_by_groundedness,
@@ -76,7 +66,6 @@ def build_graph():
         },
     )
 
-    # The two endpoint nodes still end normally.
     graph.add_edge("escalate", END)
     graph.add_edge("log_normal", END)
 

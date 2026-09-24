@@ -1,28 +1,24 @@
 """
 Answer agent: RAG-grounded, plain-language answers to patient questions.
+Routed through graph.llm_provider.call_structured -- same reasoning as
+extraction.py and triage.py, no vendor SDK imported here directly.
 
 WHY "CONTEXT STUFFING" INSTEAD OF A VECTOR DATABASE:
-"RAG" usually implies embedding many documents and retrieving only the
-top-k relevant chunks. That's the right tool when you're searching across
-a large document collection. Here, a single discharge summary is short
-enough to fit entirely in Claude's context window, so we skip retrieval
-and hand over the whole document directly. This is still grounded
-generation in the sense that matters -- the answer is constrained to
-what's actually in the document, not the model's general knowledge.
-If this system grows to search a patient's full multi-visit history,
-THAT's when a real vector store earns its complexity. Don't add
-infrastructure before you need it.
+A single discharge summary is short enough to fit entirely in the
+model's context window, so we hand over the whole document directly
+instead of embedding + retrieving chunks. Still grounded generation in
+the sense that matters -- constrained to what's in the document, not
+general knowledge. A real vector store earns its complexity only once
+you're searching across a patient's full multi-visit history.
 """
 
 from typing import Literal
 
-import anthropic
 from pydantic import BaseModel, Field
 
-from config import ANTHROPIC_API_KEY, require_api_key
+from config import require_api_key
+from graph.llm_provider import call_structured
 from graph.schemas import CarePlan
-
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
 class AnswerResult(BaseModel):
@@ -54,11 +50,8 @@ A wrong medical answer can cause real harm. When in doubt, say you don't
 know and let the care team handle it.
 """
 
-ANSWER_TOOL = {
-    "name": "record_answer",
-    "description": "Record the answer to the patient's question.",
-    "input_schema": AnswerResult.model_json_schema(),
-}
+ANSWER_TOOL_NAME = "record_answer"
+ANSWER_TOOL_DESCRIPTION = "Record the answer to the patient's question."
 
 
 def answer_question_real(
@@ -69,30 +62,22 @@ def answer_question_real(
 ) -> AnswerResult:
     require_api_key()
 
-    response = client.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=512,
-        system=ANSWER_SYSTEM_PROMPT.format(
+    raw = call_structured(
+        system_prompt=ANSWER_SYSTEM_PROMPT.format(
             language="English" if language == "en" else "Urdu"
         ),
-        tools=[ANSWER_TOOL],
-        tool_choice={"type": "tool", "name": "record_answer"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Full discharge summary:\n{discharge_text}\n\n"
-                    f'Patient\'s question: "{patient_message}"'
-                ),
-            }
-        ],
+        tool_name=ANSWER_TOOL_NAME,
+        tool_description=ANSWER_TOOL_DESCRIPTION,
+        input_schema=AnswerResult.model_json_schema(),
+        user_content=(
+            f"Full discharge summary:\n{discharge_text}\n\n"
+            f'Patient\'s question: "{patient_message}"'
+        ),
     )
-
-    tool_use_block = next(b for b in response.content if b.type == "tool_use")
-    return AnswerResult(**tool_use_block.input)
+    return AnswerResult(**raw)
 
 
-# --- Swapping this into the graph, once your API key is ready ---
+# --- Swapping this into the graph ---
 # In nodes.py, replace answer_question's body with:
 #
 #     from graph.answering import answer_question_real
@@ -102,6 +87,5 @@ def answer_question_real(
 #     )
 #     return {"answer": result.answer, "grounded": result.grounded}
 #
-# This one also needs a small change in build.py, since an ungrounded
-# answer should now escalate instead of ending the graph -- see the note
-# below in this file's matching build.py instructions.
+# This also requires the routing change in build.py we discussed earlier
+# (route_by_groundedness) -- if you haven't added it yet, do that now too.

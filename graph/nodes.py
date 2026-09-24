@@ -3,78 +3,86 @@ Every function here is a NODE in the graph. Each one takes the current
 state and returns a dict of the fields it wants to update -- LangGraph
 merges that dict back into the shared state automatically.
 
-Right now every node uses simple mock/rule-based logic instead of calling
-Claude. This lets us run the WHOLE pipeline end-to-end today and prove the
-wiring (the edges and branches) is correct, before any API key exists.
-Each docstring says exactly what real logic will replace the mock later.
+This is the consolidated version: all four LLM-backed nodes (extraction,
+intent classification, triage, answering) are live, routed through
+graph.llm_provider.call_structured so they work with whichever provider
+LLM_PROVIDER in .env points to. Persistence (storage.py) is wired into
+extract_care_plan (saves the care plan the moment it's extracted) and
+both terminal nodes (logs every check-in, escalated or not).
 """
-
-from graph.schemas import CarePlan, Medication
-
 
 
 def extract_care_plan(state: dict) -> dict:
-    """
-    REAL VERSION (now): sends the discharge summary to the configured LLM
-    provider and returns a validated CarePlan object.
-
-    The provider (Groq today, Claude tomorrow) is controlled entirely by
-    the LLM_PROVIDER env var -- this function doesn't know or care which.
-    """
     print("[extract_care_plan] Reading discharge summary...")
     from graph.extraction import extract_care_plan_real
+    from storage import save_care_plan
+
     real_plan = extract_care_plan_real(state["discharge_text"])
+    save_care_plan(state["patient_id"], real_plan, language=state.get("language", "en"))
     return {"care_plan": real_plan}
 
-def classify_intent(state: dict) -> dict:
-    """
-    REAL VERSION (later): one LLM call asking Claude to classify the
-    patient's message as "question" or "symptom_report".
 
-    MOCK VERSION (now): crude keyword check, just so the conditional
-    branch below actually has something to branch on.
-    """
-    msg = state["patient_message"].lower()
-    symptom_words = ["pain", "fever", "swelling", "bleeding", "hurts"]
-    intent = "symptom_report" if any(w in msg for w in symptom_words) else "question"
-    print(f"[classify_intent] intent = {intent}")
-    return {"intent": intent}
+def classify_intent(state: dict) -> dict:
+    print("[classify_intent] Classifying intent...")
+    from graph.intent import classify_intent_real
+
+    result = classify_intent_real(state["patient_message"])
+    return {"intent": result.intent}
 
 
 def answer_question(state: dict) -> dict:
-    """
-    REAL VERSION (later): RAG -- retrieve relevant chunks from the
-    patient's care_plan / discharge doc (vector store), then ask Claude
-    to answer in plain language, in state['language']. If retrieval finds
-    nothing relevant, the answer must say so and trigger escalation instead
-    of guessing.
+    print("[answer_question] Generating grounded answer...")
+    from graph.answering import answer_question_real
 
-    MOCK VERSION (now): fixed placeholder answer.
-    """
-    print("[answer_question] Generating grounded answer (mock)...")
-    return {"answer": "(placeholder) Based on your discharge plan, here's the answer..."}
+    result = answer_question_real(
+        state["patient_message"], state["care_plan"],
+        state["discharge_text"], state["language"],
+    )
+    return {"answer": result.answer, "grounded": result.grounded}
 
 
 def triage_symptom(state: dict) -> dict:
     print("[triage_symptom] Assessing symptom risk...")
     from graph.triage import triage_symptom_real
+
     result = triage_symptom_real(state["patient_message"], state["care_plan"])
     return {"risk_level": result.risk_level, "triage_reasoning": result.reasoning}
 
 
 def escalate(state: dict) -> dict:
-    """
-    REAL VERSION (later): write an alert row to the nurse dashboard's DB
-    with full conversation context, and optionally notify via Twilio.
-    """
     print("[escalate] Sending alert to nurse dashboard with full context.")
+    from storage import log_message
+
+    reasoning = state.get("triage_reasoning")
+    if reasoning is None and state.get("grounded") is False:
+        reasoning = (
+            "Answer could not be confidently grounded in the discharge "
+            "document; escalated for human review."
+        )
+
+    log_message(
+        patient_id=state["patient_id"],
+        content=state["patient_message"],
+        intent=state.get("intent"),
+        risk_level=state.get("risk_level"),
+        answer=state.get("answer"),
+        escalated=True,
+        reasoning=reasoning,
+    )
     return {"escalated": True}
 
 
 def log_normal(state: dict) -> dict:
-    """
-    REAL VERSION (later): log this check-in as normal, let the scheduler
-    queue the next routine check-in.
-    """
     print("[log_normal] Logged as normal, continuing routine check-ins.")
+    from storage import log_message
+
+    log_message(
+        patient_id=state["patient_id"],
+        content=state["patient_message"],
+        intent=state.get("intent"),
+        risk_level=state.get("risk_level"),
+        answer=state.get("answer"),
+        escalated=False,
+        reasoning=state.get("triage_reasoning"),
+    )
     return {"escalated": False}
