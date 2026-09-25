@@ -18,6 +18,10 @@ provider sits underneath.
 
 import os
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()  # self-contained: don't rely on some other module having
+                # already loaded .env first, regardless of import order
 
 META_WHATSAPP_TOKEN = os.getenv("META_WHATSAPP_TOKEN")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
