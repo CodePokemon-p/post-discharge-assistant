@@ -4,17 +4,23 @@ from typing import List
 
 class Medication(BaseModel):
     name: str
-    schedule: str  # e.g. "every 8 hours"
+    schedule: str = Field(
+        default="Not clearly specified in document -- verify with care team",
+        description="Dosage, frequency, and any instructions, exactly as "
+        "written. If the document's wording doesn't map cleanly to a "
+        "clear schedule, put whatever partial dosing text IS available "
+        "here rather than omitting the field entirely.",
+    )
 
 
 class CarePlan(BaseModel):
     """
-    Domain model for a structured care plan. This is the shape the rest
-    of the graph (triage, logging, escalation) works with.
+    Domain model for a structured care plan. This is what the rest of
+    the graph works with -- triage, logging, escalation.
     """
     diagnosis: str
     medications: List[Medication]
-    follow_up_date: str  # ISO date string, e.g. "2026-10-05"
+    follow_up_date: str
     red_flags: List[str] = Field(
         description="Symptoms that should trigger escalation to a nurse"
     )
@@ -23,17 +29,15 @@ class CarePlan(BaseModel):
 class FlatCarePlan(BaseModel):
     """
     Groq-compatible flat schema used ONLY for the LLM extraction call.
-    Groq's tool-calling validator rejects nested arrays of objects
-    (it returned "expected object, but got string" for medications),
-    so medications are flattened to plain strings here. After extraction,
-    graph/extraction.py parses them back into Medication objects and
-    returns the rich CarePlan above.
+    Groq's tool-calling validator rejects nested arrays of objects, so
+    medications are flattened to strings here and converted back into
+    Medication objects in graph/extraction.py.
 
     When you switch to Anthropic Claude (which supports nested schemas),
     you can pass CarePlan.model_json_schema() directly and skip the
-    conversion step -- the graph code never has to change.
+    conversion step.
     """
     diagnosis: str
-    medications: List[str]  # e.g. "Ibuprofen | 400mg | every 8 hours"
+    medications: List[str]
     follow_up_date: str
     red_flags: List[str]
