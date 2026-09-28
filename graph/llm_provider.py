@@ -82,3 +82,51 @@ def _call_groq(system_prompt, tool_name, tool_description, input_schema, user_co
     )
     tool_call = response.choices[0].message.tool_calls[0]
     return json.loads(tool_call.function.arguments)
+
+
+def call_vision_text(image_base64: str, mime_type: str, prompt: str) -> str:
+    """
+    Provider-agnostic image -> text call. No tool schema here, just a
+    plain text response -- the caller (extraction.py) is responsible
+    for feeding the returned text into the normal text-based pipeline.
+    Anthropic and OpenAI-compatible (Groq) APIs use different content
+    block shapes for images, so both are handled here, same pattern as
+    call_structured.
+    """
+    if PROVIDER == "anthropic":
+        import anthropic
+        from config import ANTHROPIC_API_KEY
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=2048,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": image_base64}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        return response.content[0].text
+
+    elif PROVIDER == "groq":
+        from openai import OpenAI
+
+        client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=os.getenv("GROQ_API_KEY"))
+        response = client.chat.completions.create(
+            model=os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b"),
+            max_tokens=800,  # this model's free tier caps at 1000 output tokens/minute
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}},
+                ],
+            }],
+        )
+        return response.choices[0].message.content
+
+    else:
+        raise ValueError(f"Unknown LLM_PROVIDER: {PROVIDER!r}")
