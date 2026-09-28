@@ -1,8 +1,9 @@
 """
-Persistence layer: patient care plans + a log of every check-in message,
-backed by SQLite. Extended today with phone_number (the scheduler needs
-to know who to actually message) and get_all_patients() (so the
-scheduler can loop over every patient with a saved care plan).
+Persistence layer. Extended today with a `priority` column: "urgent"
+for real symptom-risk escalations (from triage), "low" for information
+gaps (an ungrounded question that isn't a symptom report at all). This
+is the direct fix for "why does every uncovered question flood the
+same nurse queue as an actual medical risk" -- they no longer do.
 """
 
 import json
@@ -16,7 +17,6 @@ DB_PATH = Path(__file__).parent / "data" / "patients.db"
 
 
 def init_db() -> None:
-    """Create tables if they don't already exist. Call once at startup."""
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -37,6 +37,8 @@ def init_db() -> None:
             risk_level TEXT,
             answer TEXT,
             escalated INTEGER NOT NULL DEFAULT 0,
+            priority TEXT,
+            source TEXT,
             reasoning TEXT,
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (patient_id) REFERENCES patients (patient_id)
@@ -53,9 +55,6 @@ def save_care_plan(
     phone_number: Optional[str] = None,
 ) -> None:
     conn = sqlite3.connect(DB_PATH)
-    # Preserve an existing phone_number if this call doesn't provide one
-    # (e.g. extract_care_plan re-saving a plan shouldn't erase a number
-    # set earlier).
     if phone_number is None:
         existing = conn.execute(
             "SELECT phone_number FROM patients WHERE patient_id = ?", (patient_id,)
@@ -83,10 +82,6 @@ def get_care_plan(patient_id: str) -> Optional[CarePlan]:
 
 
 def get_all_patients() -> list[dict]:
-    """
-    Every patient with a saved care plan -- what the scheduler loops
-    over to send daily check-ins.
-    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT * FROM patients").fetchall()
@@ -106,25 +101,28 @@ def log_message(
     risk_level: Optional[str] = None,
     answer: Optional[str] = None,
     escalated: bool = False,
+    priority: Optional[str] = None,
+    source: Optional[str] = None,
     reasoning: Optional[str] = None,
 ) -> None:
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """INSERT INTO messages
-           (patient_id, content, intent, risk_level, answer, escalated, reasoning)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (patient_id, content, intent, risk_level, answer, int(escalated), reasoning),
+           (patient_id, content, intent, risk_level, answer, escalated, priority, source, reasoning)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (patient_id, content, intent, risk_level, answer, int(escalated), priority, source, reasoning),
     )
     conn.commit()
     conn.close()
 
 
 def get_escalations() -> list[dict]:
-    """All escalated messages, newest first -- tomorrow's nurse dashboard data source."""
+    """All escalated messages, urgent first, then newest within each tier."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT * FROM messages WHERE escalated = 1 ORDER BY timestamp DESC"
+        """SELECT * FROM messages WHERE escalated = 1
+           ORDER BY CASE priority WHEN 'urgent' THEN 0 ELSE 1 END, timestamp DESC"""
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
