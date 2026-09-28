@@ -3,12 +3,14 @@ Every function here is a NODE in the graph. Each one takes the current
 state and returns a dict of the fields it wants to update -- LangGraph
 merges that dict back into the shared state automatically.
 
-This is the consolidated version: all four LLM-backed nodes (extraction,
-intent classification, triage, answering) are live, routed through
-graph.llm_provider.call_structured so they work with whichever provider
-LLM_PROVIDER in .env points to. Persistence (storage.py) is wired into
-extract_care_plan (saves the care plan the moment it's extracted) and
-both terminal nodes (logs every check-in, escalated or not).
+Escalation policy (matches mentor feedback):
+  * symptom_report + high risk -> escalate (real-time nurse alert)
+  * symptom_report + low risk  -> log_normal (no alert)
+  * question (grounded or not) -> answered by agent, no alert
+  * off_topic                  -> polite decline, no alert
+
+Only high-risk symptoms interrupt a nurse in real time. Everything
+else is either answered or logged for batch review.
 """
 
 
@@ -36,14 +38,72 @@ def classify_intent(state: dict) -> dict:
 
 
 def answer_question(state: dict) -> dict:
+    """
+    Three-layer answer pipeline. NEVER triggers a real-time nurse alert.
+    If the answer can't be grounded, the agent gives a soft reply and
+    the case is logged for batch review (not alerted).
+    """
     print("[answer_question] Generating grounded answer...")
     from graph.answering import answer_question_real
+    from storage import log_message
 
     result = answer_question_real(
-        state["patient_message"], state["care_plan"],
-        state["discharge_text"], state["language"],
+        state["patient_message"],
+        state["care_plan"],
+        state["discharge_text"],
+        state["language"],
     )
-    return {"answer": result.answer, "grounded": result.grounded}
+
+    # Log every answer for audit trail (no nurse alert here regardless)
+    log_message(
+        patient_id=state["patient_id"],
+        content=state["patient_message"],
+        intent=state.get("intent"),
+        risk_level=None,
+        answer=result["answer"],
+        escalated=False,
+        reasoning=(
+            f"source={result.get('source', 'unknown')}; "
+            f"grounded={result['grounded']}"
+        ),
+    )
+
+    return {
+        "answer": result["answer"],
+        "grounded": result["grounded"],
+        "escalated": False,   # <-- answer path NEVER alerts a nurse
+    }
+
+
+def decline_off_topic(state: dict) -> dict:
+    """
+    Non-medical / unrelated messages get a polite decline.
+    They do NOT hit the nurse dashboard.
+    """
+    print("[decline_off_topic] Politely declining non-medical question.")
+    from storage import log_message
+
+    reply = (
+        "I can only help with questions about your recovery after "
+        "discharge. For anything else, please reach out to your "
+        "care team directly."
+    )
+
+    log_message(
+        patient_id=state["patient_id"],
+        content=state["patient_message"],
+        intent=state.get("intent"),
+        risk_level=None,
+        answer=reply,
+        escalated=False,
+        reasoning="off_topic -- declined, no nurse alert.",
+    )
+
+    return {
+        "answer": reply,
+        "grounded": True,
+        "escalated": False,
+    }
 
 
 def triage_symptom(state: dict) -> dict:
@@ -51,19 +111,19 @@ def triage_symptom(state: dict) -> dict:
     from graph.triage import triage_symptom_real
 
     result = triage_symptom_real(state["patient_message"], state["care_plan"])
-    return {"risk_level": result.risk_level, "triage_reasoning": result.reasoning}
+    return {
+        "risk_level": result.risk_level,
+        "triage_reasoning": result.reasoning,
+    }
 
 
 def escalate(state: dict) -> dict:
-    print("[escalate] Sending alert to nurse dashboard with full context.")
+    """
+    ONLY node that alerts a nurse in real time. Reserved for high-risk
+    symptom reports.
+    """
+    print("[escalate] URGENT -- sending alert to nurse dashboard with full context.")
     from storage import log_message
-
-    reasoning = state.get("triage_reasoning")
-    if reasoning is None and state.get("grounded") is False:
-        reasoning = (
-            "Answer could not be confidently grounded in the discharge "
-            "document; escalated for human review."
-        )
 
     log_message(
         patient_id=state["patient_id"],
@@ -72,13 +132,16 @@ def escalate(state: dict) -> dict:
         risk_level=state.get("risk_level"),
         answer=state.get("answer"),
         escalated=True,
-        reasoning=reasoning,
+        reasoning=state.get("triage_reasoning"),
     )
     return {"escalated": True}
 
 
 def log_normal(state: dict) -> dict:
-    print("[log_normal] Logged as normal, continuing routine check-ins.")
+    """
+    Low-risk symptom report or routine check-in. Logged, no nurse alert.
+    """
+    print("[log_normal] Low-risk -- logged, no nurse alert.")
     from storage import log_message
 
     log_message(
