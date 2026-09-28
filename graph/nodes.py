@@ -11,21 +11,45 @@ Escalation policy (matches mentor feedback):
 
 Only high-risk symptoms interrupt a nurse in real time. Everything
 else is either answered or logged for batch review.
+
+Care-plan caching: extraction is expensive and non-deterministic, so we
+extract once per unique document and reuse the result for every message
+in the same session. Keyed by document hash -- different documents do
+not collide.
 """
+
+import hashlib
+
+
+# Module-level cache: hash(discharge_text) -> CarePlan.
+# Cleared on process restart, which is fine for a single-session demo.
+# A production version would persist this in storage.py and load it by
+# patient_id instead.
+_CARE_PLAN_CACHE: dict[str, object] = {}
 
 
 def extract_care_plan(state: dict) -> dict:
+    doc = state["discharge_text"]
+    key = hashlib.sha256(doc.encode("utf-8")).hexdigest()
+
+    cached = _CARE_PLAN_CACHE.get(key)
+    if cached is not None:
+        print("[extract_care_plan] Using cached care plan (same document).")
+        return {"care_plan": cached}
+
     print("[extract_care_plan] Reading discharge summary...")
     from graph.extraction import extract_care_plan_real
     from storage import save_care_plan
 
-    real_plan = extract_care_plan_real(state["discharge_text"])
+    real_plan = extract_care_plan_real(doc)
     save_care_plan(
         state["patient_id"],
         real_plan,
         language=state.get("language", "en"),
         phone_number=state.get("phone_number"),
     )
+
+    _CARE_PLAN_CACHE[key] = real_plan
     return {"care_plan": real_plan}
 
 
@@ -40,8 +64,7 @@ def classify_intent(state: dict) -> dict:
 def answer_question(state: dict) -> dict:
     """
     Three-layer answer pipeline. NEVER triggers a real-time nurse alert.
-    If the answer can't be grounded, the agent gives a soft reply and
-    the case is logged for batch review (not alerted).
+    Ungrounded answers get a soft reply, not an alert.
     """
     print("[answer_question] Generating grounded answer...")
     from graph.answering import answer_question_real
@@ -54,7 +77,6 @@ def answer_question(state: dict) -> dict:
         state["language"],
     )
 
-    # Log every answer for audit trail (no nurse alert here regardless)
     log_message(
         patient_id=state["patient_id"],
         content=state["patient_message"],
@@ -71,7 +93,7 @@ def answer_question(state: dict) -> dict:
     return {
         "answer": result["answer"],
         "grounded": result["grounded"],
-        "escalated": False,   # <-- answer path NEVER alerts a nurse
+        "escalated": False,
     }
 
 

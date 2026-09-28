@@ -75,7 +75,17 @@ This means an invented quote -- even if the model sets `grounded=True` -- is cau
 
 ## Known limitations / what's next
 
-- **General guidance content is placeholder.** Every entry in `general_guidance.py` must be replaced with clinician-approved text before this touches real patients. The architecture lets that content be swapped without changing any code.
+- **General guidance coverage is deliberately small.** The current
+  `general_guidance.py` has ~10 entries — a starter set. In production,
+  the coverage would grow two ways: (a) RAG over a clinician-approved
+  corpus, or (b) periodic review of fall-through logs to find and answer
+  the recurring questions patients actually ask. The logs already capture
+  every fall-through, so the data to drive this is being collected today.
+- **Fallback replies currently dead-end.** A patient asking a question
+  nobody covers gets "please check with your care team" with no
+  escalation path. The next iteration would offer an explicit opt-in
+  ("reply NURSE to flag this") so the patient can decide whether it's
+  worth a human's time.
 - **Non-deterministic LLM extraction.** The model occasionally drops a medication across runs. A prompt instruction reduces this; it does not eliminate it. Production needs a code-level cross-check.
 - **WhatsApp template requirement.** Meta requires an approved message template for the first business-initiated message to a user. Proactive daily check-ins would need an approved template for full production use; today's testing relies on the patient messaging first, which reopens a free-form reply window.
 - **Outbound reach beyond the test number** requires Meta Business Verification -- a multi-day external review process, not a codebase problem.

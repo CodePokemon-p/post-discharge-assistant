@@ -16,10 +16,11 @@ Answer agent, v2 -- three layers now, not one:
    real use). This is what stops every off-document question from
    flooding the nurse queue, per the exact gap raised in review.
 
-3. ESCALATE: only if neither layer above can answer it. This is what
-   the "low priority" queue is for -- distinguishing "no one has
-   pre-approved an answer to this yet" from "this is a symptom risk,"
-   which is a different, always-urgent path entirely (see triage.py).
+3. SOFT REPLY: only if neither layer above can answer it. Note the
+   wording is deliberately "please check with your care team" -- the
+   design only alerts a nurse for high-risk symptoms (see triage.py),
+   so this layer must not promise the patient that someone has been
+   notified when nobody has.
 """
 
 from typing import Literal
@@ -35,7 +36,7 @@ from general_guidance import find_general_guidance
 class AnswerResult(BaseModel):
     answer: str = Field(
         description="Plain-language answer, or a message telling the patient "
-        "their care team will follow up"
+        "to check with their care team"
     )
     grounded: bool = Field(
         description="True only if the discharge information actually supports "
@@ -59,11 +60,12 @@ asked. Answer ONLY using information present in the discharge summary.
 Never use general medical knowledge to fill gaps -- if the discharge
 summary doesn't cover the patient's question, set grounded to false,
 source_quote to an empty string, and write an answer telling the patient
-their care team will follow up, rather than guessing.
+to check with their care team, rather than guessing.
 
 If grounded is true, source_quote MUST be an exact, verbatim copy of the
 sentence or phrase from the discharge summary that supports your answer
--- not a paraphrase, not a summary. Copy it exactly as written.
+-- not a paraphrase, not a summary. Copy it exactly as written. The
+quote must be at least 4 words long; a single word is not evidence.
 
 Write your answer in plain, everyday language -- no medical jargon a
 non-clinician wouldn't understand. Respond in the patient's preferred
@@ -85,11 +87,18 @@ def _verify_quote(source_quote: str, discharge_text: str) -> bool:
     concrete answer to "how do you verify it's not hallucinating":
     we don't just ask the model to self-report confidence, we check
     its claimed evidence against the source text in code.
+
+    Requires the quote to be at least 4 words long. A one- or two-word
+    "quote" (e.g. "yes") could pass a naive substring check without
+    being real evidence, so we reject short quotes as unverifiable.
     """
-    if not source_quote.strip():
+    quote = source_quote.strip()
+    if not quote:
+        return False
+    if len(quote.split()) < 4:
         return False
     normalize = lambda s: " ".join(s.lower().split())
-    return normalize(source_quote) in normalize(discharge_text)
+    return normalize(quote) in normalize(discharge_text)
 
 
 def answer_question_real(
@@ -100,8 +109,8 @@ def answer_question_real(
 ) -> dict:
     """
     Returns a dict with: answer, grounded, source, priority.
-    source is one of "document", "general_guidance", or "escalated" --
-    the dashboard and nodes.py use this to route correctly.
+    source is one of "document", "general_guidance", or "escalated".
+    Never triggers a real-time nurse alert -- only triage does that.
     """
     require_api_key()
 
@@ -130,7 +139,7 @@ def answer_question_real(
         }
 
     # LAYER 2: check the curated general-guidance knowledge base before
-    # giving up and escalating.
+    # giving up.
     guidance = find_general_guidance(patient_message)
     if guidance:
         return {
@@ -140,16 +149,16 @@ def answer_question_real(
             "priority": None,
         }
 
-    # LAYER 3: neither the document nor general guidance covers this --
-    # escalate, but as LOW priority, not urgent. This is not a symptom
-    # risk, it's an information gap, and the dashboard should treat
-    # those very differently.
+    # LAYER 3: neither the document nor general guidance covers this.
+    # Wording is honest: "please check with your care team" rather than
+    # "I've flagged it" (which would imply a notification that does not
+    # happen in this path).
     return {
         "answer": (
             "Your discharge summary doesn't cover this specific question. "
-            "I've flagged it for your care team to follow up with you."
+            "Please check this with your care team."
         ),
         "grounded": False,
-        "source": "escalated",
-        "priority": "low",
+        "source": "soft_reply",
+        "priority": None,
     }
