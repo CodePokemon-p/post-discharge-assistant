@@ -140,12 +140,9 @@ def triage_symptom(state: dict) -> dict:
 
 
 def escalate(state: dict) -> dict:
-    """
-    ONLY node that alerts a nurse in real time. Reserved for high-risk
-    symptom reports.
-    """
     print("[escalate] URGENT -- sending alert to nurse dashboard with full context.")
     from storage import log_message
+    from pushover_notify import send_pushover_notification
 
     log_message(
         patient_id=state["patient_id"],
@@ -156,6 +153,16 @@ def escalate(state: dict) -> dict:
         escalated=True,
         reasoning=state.get("triage_reasoning"),
     )
+
+    # Real-time push to the nurse's phone
+    send_pushover_notification(
+        title=f"URGENT: {state.get('patient_id', 'unknown')}",
+        message=(
+            f"Patient: {state.get('patient_message', '')[:200]}\n"
+            f"Reason: {state.get('triage_reasoning', 'High-risk symptom')}"
+        ),
+    )
+
     return {"escalated": True}
 
 
