@@ -106,13 +106,15 @@ def answer_question_real(
     care_plan: CarePlan,
     discharge_text: str,
     language: Literal["en", "ur"],
+    history: list = None,
 ) -> dict:
-    """
-    Returns a dict with: answer, grounded, source, priority.
-    source is one of "document", "general_guidance", or "escalated".
-    Never triggers a real-time nurse alert -- only triage does that.
-    """
     require_api_key()
+
+    history_block = ""
+    if history:
+        lines = [f"- Patient: {h['content']}" + (f" | Agent: {h['answer']}" if h.get('answer') else "")
+                 for h in history[-5:]]
+        history_block = "Recent conversation:\n" + "\n".join(lines) + "\n\n"
 
     raw = call_structured(
         system_prompt=ANSWER_SYSTEM_PROMPT.format(
@@ -123,9 +125,11 @@ def answer_question_real(
         input_schema=AnswerResult.model_json_schema(),
         user_content=(
             f"Full discharge summary:\n{discharge_text}\n\n"
-            f'Patient\'s question: "{patient_message}"'
+            f"{history_block}"
+            f'Current question: "{patient_message}"'
         ),
     )
+   
     result = AnswerResult(**raw)
 
     # LAYER 1: verify the model's claimed evidence actually exists in
