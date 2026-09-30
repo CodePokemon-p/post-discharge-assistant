@@ -65,18 +65,22 @@ INTENT_TOOL_NAME = "record_intent"
 INTENT_TOOL_DESCRIPTION = "Record the classified intent of the patient's message."
 
 
-def classify_intent_real(patient_message: str) -> IntentResult:
+def classify_intent_real(patient_message: str, history: list = None) -> IntentResult:
     require_api_key()
+
+    history_block = ""
+    if history:
+        lines = [f"- {h['content']}" for h in history[-5:]]
+        history_block = "Recent patient messages:\n" + "\n".join(lines) + "\n\n"
 
     raw = call_structured(
         system_prompt=INTENT_SYSTEM_PROMPT,
         tool_name=INTENT_TOOL_NAME,
         tool_description=INTENT_TOOL_DESCRIPTION,
         input_schema=IntentResult.model_json_schema(),
-        user_content=f'Patient\'s message: "{patient_message}"',
+        user_content=f"{history_block}Current message: \"{patient_message}\"",
     )
     return IntentResult(**raw)
-
 
 # --- Swapping this into the graph ---
 # In nodes.py, replace classify_intent's body with:

@@ -20,5 +20,6 @@ class DischargeState(TypedDict, total=False):
     triage_reasoning: Optional[str] # why triage_symptom made its risk_level call
     escalated: bool                 # True if this turn was sent to the nurse dashboard
     phone_number: Optional[str]   # patient's WhatsApp number, e.g. "+923001234567"
+    conversation_history: list  # list of {content, answer, intent, created_at}
 
     

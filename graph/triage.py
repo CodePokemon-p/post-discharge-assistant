@@ -8,6 +8,7 @@ from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
+from answering import ANSWER_SYSTEM_PROMPT, ANSWER_TOOL_DESCRIPTION, ANSWER_TOOL_NAME, AnswerResult
 from config import require_api_key
 from graph.llm_provider import call_structured
 from graph.schemas import CarePlan
@@ -52,28 +53,35 @@ def rule_based_check(patient_message: str, red_flags: List[str]) -> List[str]:
     return [flag for flag in red_flags if flag.split()[0].lower() in msg]
 
 
-def triage_symptom_real(patient_message: str, care_plan: CarePlan) -> TriageResult:
-    matched = rule_based_check(patient_message, care_plan.red_flags)
-    if matched:
-        return TriageResult(
-            risk_level="high",
-            matched_red_flags=matched,
-            reasoning="Matched an explicit red-flag keyword via rule-based check.",
-        )
-
+def answer_question_real(
+    patient_message: str,
+    care_plan: CarePlan,
+    discharge_text: str,
+    language: Literal["en", "ur"],
+    history: list = None,
+) -> dict:
     require_api_key()
 
+    history_block = ""
+    if history:
+        lines = [f"- Patient: {h['content']}" + (f" | Agent: {h['answer']}" if h.get('answer') else "")
+                 for h in history[-5:]]
+        history_block = "Recent conversation:\n" + "\n".join(lines) + "\n\n"
+
     raw = call_structured(
-        system_prompt=TRIAGE_SYSTEM_PROMPT,
-        tool_name=TRIAGE_TOOL_NAME,
-        tool_description=TRIAGE_TOOL_DESCRIPTION,
-        input_schema=TriageResult.model_json_schema(),
+        system_prompt=ANSWER_SYSTEM_PROMPT.format(
+            language="English" if language == "en" else "Urdu"
+        ),
+        tool_name=ANSWER_TOOL_NAME,
+        tool_description=ANSWER_TOOL_DESCRIPTION,
+        input_schema=AnswerResult.model_json_schema(),
         user_content=(
-            f"Patient's diagnosis: {care_plan.diagnosis}\n"
-            f"Red flags to watch for: {care_plan.red_flags}\n\n"
-            f'Patient\'s message: "{patient_message}"'
+            f"Full discharge summary:\n{discharge_text}\n\n"
+            f"{history_block}"
+            f'Current question: "{patient_message}"'
         ),
     )
+    # rest unchanged
     return TriageResult(**raw)
 
 

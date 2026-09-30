@@ -1,11 +1,13 @@
 from langgraph.graph import StateGraph, END
 
+import graph
 from graph.state import DischargeState
 from graph.nodes import (
     extract_care_plan,
     classify_intent,
     answer_question,
     decline_off_topic,
+    load_history,
     triage_symptom,
     escalate,
     log_normal,
@@ -38,7 +40,9 @@ def build_graph():
     graph.add_node("escalate", escalate)
     graph.add_node("log_normal", log_normal)
 
-    graph.set_entry_point("extract_care_plan")
+    graph.add_node("load_history", load_history)
+    graph.set_entry_point("load_history")
+    graph.add_edge("load_history", "extract_care_plan")
     graph.add_edge("extract_care_plan", "classify_intent")
 
     # Branch 1: three-way intent split (question | symptom | off_topic)

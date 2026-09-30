@@ -27,6 +27,12 @@ import hashlib
 # patient_id instead.
 _CARE_PLAN_CACHE: dict[str, object] = {}
 
+def load_history(state: dict) -> dict:
+    """Fetch the patient's recent message history before any LLM call."""
+    from storage import get_recent_messages
+    history = get_recent_messages(state["patient_id"], limit=20, days=7)
+    print(f"[load_history] Loaded {len(history)} prior messages.")
+    return {"conversation_history": history}
 
 def extract_care_plan(state: dict) -> dict:
     doc = state["discharge_text"]
@@ -56,16 +62,14 @@ def extract_care_plan(state: dict) -> dict:
 def classify_intent(state: dict) -> dict:
     print("[classify_intent] Classifying intent...")
     from graph.intent import classify_intent_real
-
-    result = classify_intent_real(state["patient_message"])
+    result = classify_intent_real(
+        state["patient_message"],
+        history=state.get("conversation_history", []),
+    )
     return {"intent": result.intent}
 
 
 def answer_question(state: dict) -> dict:
-    """
-    Three-layer answer pipeline. NEVER triggers a real-time nurse alert.
-    Ungrounded answers get a soft reply, not an alert.
-    """
     print("[answer_question] Generating grounded answer...")
     from graph.answering import answer_question_real
     from storage import log_message
@@ -75,7 +79,9 @@ def answer_question(state: dict) -> dict:
         state["care_plan"],
         state["discharge_text"],
         state["language"],
+        history=state.get("conversation_history", []),
     )
+
 
     log_message(
         patient_id=state["patient_id"],
@@ -131,12 +137,12 @@ def decline_off_topic(state: dict) -> dict:
 def triage_symptom(state: dict) -> dict:
     print("[triage_symptom] Assessing symptom risk...")
     from graph.triage import triage_symptom_real
-
-    result = triage_symptom_real(state["patient_message"], state["care_plan"])
-    return {
-        "risk_level": result.risk_level,
-        "triage_reasoning": result.reasoning,
-    }
+    result = triage_symptom_real(
+        state["patient_message"],
+        state["care_plan"],
+        history=state.get("conversation_history", []),
+    )
+    return {"risk_level": result.risk_level, "triage_reasoning": result.reasoning}
 
 
 def escalate(state: dict) -> dict:

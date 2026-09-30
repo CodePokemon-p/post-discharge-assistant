@@ -126,3 +126,34 @@ def get_escalations() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def get_recent_messages(patient_id: str, limit: int = 20, days: int = 7):
+    """
+    Return the last N messages for a patient within the last D days,
+    oldest first (so prompts read chronologically).
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT content, answer, intent, created_at
+        FROM messages
+        WHERE patient_id = ?
+          AND created_at >= datetime('now', ?)
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (patient_id, f"-{days} days", limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in reversed(rows)]
+
+def get_all_messages(limit: int = 200):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM messages ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
