@@ -3,29 +3,25 @@ Every function here is a NODE in the graph. Each one takes the current
 state and returns a dict of the fields it wants to update -- LangGraph
 merges that dict back into the shared state automatically.
 
-Escalation policy (matches mentor feedback):
+Escalation policy:
   * symptom_report + high risk -> escalate (real-time nurse alert)
   * symptom_report + low risk  -> log_normal (no alert)
   * question (grounded or not) -> answered by agent, no alert
   * off_topic                  -> polite decline, no alert
 
-Only high-risk symptoms interrupt a nurse in real time. Everything
-else is either answered or logged for batch review.
-
-Care-plan caching: extraction is expensive and non-deterministic, so we
-extract once per unique document and reuse the result for every message
-in the same session. Keyed by document hash -- different documents do
-not collide.
+Two entry paths:
+  1. Admin intake   -> discharge_text is provided; extract_care_plan runs.
+  2. WhatsApp reply -> care_plan is already loaded from DB; extraction is skipped.
 """
 
 import hashlib
 
 
 # Module-level cache: hash(discharge_text) -> CarePlan.
-# Cleared on process restart, which is fine for a single-session demo.
-# A production version would persist this in storage.py and load it by
-# patient_id instead.
+# Only used by the admin-intake path. WhatsApp path passes care_plan in
+# state and this cache is never touched.
 _CARE_PLAN_CACHE: dict[str, object] = {}
+
 
 def load_history(state: dict) -> dict:
     """Fetch the patient's recent message history before any LLM call."""
@@ -34,10 +30,24 @@ def load_history(state: dict) -> dict:
     print(f"[load_history] Loaded {len(history)} prior messages.")
     return {"conversation_history": history}
 
-def extract_care_plan(state: dict) -> dict:
-    doc = state["discharge_text"]
-    key = hashlib.sha256(doc.encode("utf-8")).hexdigest()
 
+def extract_care_plan(state: dict) -> dict:
+    """
+    If care_plan is already in state (WhatsApp path, loaded from DB),
+    do nothing -- we don't need to extract again.
+    If discharge_text is provided and no care_plan exists yet
+    (admin intake path), extract and save it.
+    """
+    if state.get("care_plan") is not None:
+        print("[extract_care_plan] Care plan already loaded -- skipping extraction.")
+        return {}
+
+    doc = state.get("discharge_text", "")
+    if not doc:
+        print("[extract_care_plan] No care plan and no discharge text -- nothing to do.")
+        return {}
+
+    key = hashlib.sha256(doc.encode("utf-8")).hexdigest()
     cached = _CARE_PLAN_CACHE.get(key)
     if cached is not None:
         print("[extract_care_plan] Using cached care plan (same document).")
@@ -54,7 +64,6 @@ def extract_care_plan(state: dict) -> dict:
         language=state.get("language", "en"),
         phone_number=state.get("phone_number"),
     )
-
     _CARE_PLAN_CACHE[key] = real_plan
     return {"care_plan": real_plan}
 
@@ -82,7 +91,6 @@ def answer_question(state: dict) -> dict:
         history=state.get("conversation_history", []),
     )
 
-
     log_message(
         patient_id=state["patient_id"],
         content=state["patient_message"],
@@ -104,10 +112,6 @@ def answer_question(state: dict) -> dict:
 
 
 def decline_off_topic(state: dict) -> dict:
-    """
-    Non-medical / unrelated messages get a polite decline.
-    They do NOT hit the nurse dashboard.
-    """
     print("[decline_off_topic] Politely declining non-medical question.")
     from storage import log_message
 
@@ -127,11 +131,7 @@ def decline_off_topic(state: dict) -> dict:
         reasoning="off_topic -- declined, no nurse alert.",
     )
 
-    return {
-        "answer": reply,
-        "grounded": True,
-        "escalated": False,
-    }
+    return {"answer": reply, "grounded": True, "escalated": False}
 
 
 def triage_symptom(state: dict) -> dict:
@@ -160,7 +160,6 @@ def escalate(state: dict) -> dict:
         reasoning=state.get("triage_reasoning"),
     )
 
-    # Real-time push to the nurse's phone
     send_pushover_notification(
         title=f"URGENT: {state.get('patient_id', 'unknown')}",
         message=(
@@ -173,9 +172,6 @@ def escalate(state: dict) -> dict:
 
 
 def log_normal(state: dict) -> dict:
-    """
-    Low-risk symptom report or routine check-in. Logged, no nurse alert.
-    """
     print("[log_normal] Low-risk -- logged, no nurse alert.")
     from storage import log_message
 
