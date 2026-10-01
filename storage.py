@@ -1,51 +1,63 @@
 """
-Persistence layer. Extended today with a `priority` column: "urgent"
-for real symptom-risk escalations (from triage), "low" for information
-gaps (an ungrounded question that isn't a symptom report at all). This
-is the direct fix for "why does every uncovered question flood the
-same nurse queue as an actual medical risk" -- they no longer do.
+Persistence layer. Postgres-backed.
+
+All functions keep identical signatures to the SQLite version, so no
+caller needs to change. Connection is read from DATABASE_URL env var.
 """
 
 import json
-import sqlite3
-from pathlib import Path
+import os
 from typing import Optional
 
+import psycopg
+from psycopg.rows import dict_row
+from dotenv import load_dotenv
 from graph.schemas import CarePlan
 
-DB_PATH = Path(__file__).parent / "data" / "patients.db"
+load_dotenv()
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+def _get_conn():
+    """Open a new Postgres connection with dict-style row access."""
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Add it to .env, e.g.\n"
+            "DATABASE_URL=postgresql://user:password@host:5432/dbname"
+        )
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_db() -> None:
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS patients (
-            patient_id TEXT PRIMARY KEY,
-            care_plan_json TEXT NOT NULL,
-            language TEXT NOT NULL DEFAULT 'en',
-            phone_number TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            patient_id TEXT NOT NULL,
-            content TEXT NOT NULL,
-            intent TEXT,
-            risk_level TEXT,
-            answer TEXT,
-            escalated INTEGER NOT NULL DEFAULT 0,
-            priority TEXT,
-            source TEXT,
-            reasoning TEXT,
-            timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (patient_id) REFERENCES patients (patient_id)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    """Create tables if they don't exist. Idempotent."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS patients (
+                    patient_id TEXT PRIMARY KEY,
+                    care_plan_json TEXT NOT NULL,
+                    language TEXT NOT NULL DEFAULT 'en',
+                    phone_number TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    patient_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    intent TEXT,
+                    risk_level TEXT,
+                    answer TEXT,
+                    escalated INTEGER NOT NULL DEFAULT 0,
+                    priority TEXT,
+                    source TEXT,
+                    reasoning TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (patient_id) REFERENCES patients (patient_id)
+                )
+            """)
+        conn.commit()
 
 
 def save_care_plan(
@@ -54,38 +66,48 @@ def save_care_plan(
     language: str = "en",
     phone_number: Optional[str] = None,
 ) -> None:
-    conn = sqlite3.connect(DB_PATH)
-    if phone_number is None:
-        existing = conn.execute(
-            "SELECT phone_number FROM patients WHERE patient_id = ?", (patient_id,)
-        ).fetchone()
-        phone_number = existing[0] if existing else None
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            if phone_number is None:
+                cur.execute(
+                    "SELECT phone_number FROM patients WHERE patient_id = %s",
+                    (patient_id,),
+                )
+                existing = cur.fetchone()
+                phone_number = existing["phone_number"] if existing else None
 
-    conn.execute(
-        "INSERT OR REPLACE INTO patients (patient_id, care_plan_json, language, phone_number) "
-        "VALUES (?, ?, ?, ?)",
-        (patient_id, care_plan.model_dump_json(), language, phone_number),
-    )
-    conn.commit()
-    conn.close()
+            cur.execute(
+                """
+                INSERT INTO patients (patient_id, care_plan_json, language, phone_number)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (patient_id) DO UPDATE SET
+                    care_plan_json = EXCLUDED.care_plan_json,
+                    language = EXCLUDED.language,
+                    phone_number = EXCLUDED.phone_number
+                """,
+                (patient_id, care_plan.model_dump_json(), language, phone_number),
+            )
+        conn.commit()
 
 
 def get_care_plan(patient_id: str) -> Optional[CarePlan]:
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT care_plan_json FROM patients WHERE patient_id = ?", (patient_id,)
-    ).fetchone()
-    conn.close()
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT care_plan_json FROM patients WHERE patient_id = %s",
+                (patient_id,),
+            )
+            row = cur.fetchone()
     if row is None:
         return None
-    return CarePlan(**json.loads(row[0]))
+    return CarePlan(**json.loads(row["care_plan_json"]))
 
 
 def get_all_patients() -> list[dict]:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT * FROM patients").fetchall()
-    conn.close()
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM patients")
+            rows = cur.fetchall()
     results = []
     for row in rows:
         d = dict(row)
@@ -105,55 +127,62 @@ def log_message(
     source: Optional[str] = None,
     reasoning: Optional[str] = None,
 ) -> None:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        """INSERT INTO messages
-           (patient_id, content, intent, risk_level, answer, escalated, priority, source, reasoning)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (patient_id, content, intent, risk_level, answer, int(escalated), priority, source, reasoning),
-    )
-    conn.commit()
-    conn.close()
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO messages
+                   (patient_id, content, intent, risk_level, answer,
+                    escalated, priority, source, reasoning)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    patient_id, content, intent, risk_level, answer,
+                    int(escalated), priority, source, reasoning,
+                ),
+            )
+        conn.commit()
 
 
 def get_escalations() -> list[dict]:
     """All escalated messages, urgent first, then newest within each tier."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """SELECT * FROM messages WHERE escalated = 1
-           ORDER BY CASE priority WHEN 'urgent' THEN 0 ELSE 1 END, timestamp DESC"""
-    ).fetchall()
-    conn.close()
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT * FROM messages WHERE escalated = 1
+                   ORDER BY CASE priority WHEN 'urgent' THEN 0 ELSE 1 END,
+                            timestamp DESC"""
+            )
+            rows = cur.fetchall()
     return [dict(r) for r in rows]
 
-def get_recent_messages(patient_id: str, limit: int = 20, days: int = 7):
+
+def get_recent_messages(patient_id: str, limit: int = 20, days: int = 7) -> list[dict]:
     """
-    Return the last N messages for a patient within the last D days,
-    oldest first (so prompts read chronologically).
+    Last N messages for a patient within the last D days, oldest first
+    (so prompts read chronologically).
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """
-        SELECT content, answer, intent, created_at
-        FROM messages
-        WHERE patient_id = ?
-          AND created_at >= datetime('now', ?)
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (patient_id, f"-{days} days", limit),
-    ).fetchall()
-    conn.close()
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT content, answer, intent, timestamp
+                FROM messages
+                WHERE patient_id = %s
+                  AND timestamp >= NOW() - make_interval(days => %s)
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """,
+                (patient_id, days, limit),
+            )
+            rows = cur.fetchall()
     return [dict(r) for r in reversed(rows)]
 
-def get_all_messages(limit: int = 200):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM messages ORDER BY created_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    conn.close()
+
+def get_all_messages(limit: int = 200) -> list[dict]:
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM messages ORDER BY timestamp DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
     return [dict(r) for r in rows]
