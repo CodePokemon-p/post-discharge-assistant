@@ -1,7 +1,7 @@
 """
 FastAPI webhook for Meta's WhatsApp Cloud API + Admin intake + Nurse dashboard.
 
-Architecture (correct, non-demo):
+Architecture:
   * Admin uploads a discharge summary through /intake (with a phone number).
   * System extracts the care plan and saves it to the DB, keyed by phone.
   * When that patient messages on WhatsApp, the webhook looks up their
@@ -9,20 +9,35 @@ Architecture (correct, non-demo):
   * No files are read at startup. No hardcoded demo patient. Every
     WhatsApp sender is treated as their own patient.
 
+SECURITY (Phase A):
+  * /dashboard and /intake require HTTP Basic auth (ADMIN_USER / ADMIN_PASSWORD).
+  * POST /meta/webhook requires a valid X-Hub-Signature-256 (META_APP_SECRET).
+  * GET /meta/webhook uses META_VERIFY_TOKEN (no default; must be set).
+  * Logs never contain message text, care plans, diagnoses or full phone numbers.
+  * Everything rendered on the dashboard is HTML-escaped.
+
 RUNNING:
 1. uvicorn webhook:app --reload --port 8000
 2. cloudflared tunnel --url http://localhost:8000
 3. Meta dashboard -> WhatsApp -> Configuration -> Webhook:
      Callback URL = https://<tunnel>/meta/webhook
      Verify token = META_VERIFY_TOKEN from .env
-4. Admin: open http://localhost:8000/intake to register a patient.
+4. Admin: open http://localhost:8000/intake (browser asks for the admin login).
 5. Patient: send a WhatsApp message from their phone.
 """
 
 import base64
+import html
+import json
+import logging
 import os
+import secrets
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from dotenv import load_dotenv
+
+load_dotenv()  # before any module that reads env vars at import time
+
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (
     PlainTextResponse,
     JSONResponse,
@@ -33,12 +48,15 @@ from fastapi.responses import (
 from graph.build import build_graph
 from storage import init_db, get_care_plan, save_care_plan, get_escalations, get_all_messages
 from messaging import send_whatsapp_message
+from safe_logging import patient_ref, setup_logging
+from security import require_admin, require_meta_signature
+
+setup_logging()
+logger = logging.getLogger("webhook")
 
 app = FastAPI()
 init_db()
 graph_app = build_graph()
-
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "discharge-assistant-verify")
 
 
 # ---------------------------------------------------------------------------
@@ -63,44 +81,67 @@ def _care_plan_to_text(care_plan) -> str:
     )
 
 
+def _esc(value) -> str:
+    """HTML-escape anything user- or LLM-controlled before putting it in a page."""
+    return html.escape("" if value is None else str(value))
+
+
+def _meta_configured() -> bool:
+    return bool(os.getenv("META_WHATSAPP_TOKEN") and os.getenv("META_PHONE_NUMBER_ID"))
+
+
 # ---------------------------------------------------------------------------
 # Meta WhatsApp webhook
 # ---------------------------------------------------------------------------
 
 @app.get("/meta/webhook")
 async def verify_webhook(request: Request):
+    """One-time handshake. Uses the verify token (NOT the app secret)."""
     params = request.query_params
+    expected = os.getenv("META_VERIFY_TOKEN", "")
+    supplied = params.get("hub.verify_token", "")
     if (
-        params.get("hub.mode") == "subscribe"
-        and params.get("hub.verify_token") == META_VERIFY_TOKEN
+        expected
+        and params.get("hub.mode") == "subscribe"
+        and secrets.compare_digest(supplied.encode(), expected.encode())
     ):
         return PlainTextResponse(params.get("hub.challenge", ""))
     return PlainTextResponse("Verification failed", status_code=403)
 
 
+# Plain `def` (not async): FastAPI runs it in a threadpool, so the blocking
+# graph call and the WhatsApp send do not freeze the event loop.
 @app.post("/meta/webhook")
-async def receive_message(request: Request):
-    payload = await request.json()
+def receive_message(raw: bytes = Depends(require_meta_signature)):
+    # `raw` is the signature-verified request body.
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return JSONResponse({"status": "bad_request"}, status_code=400)
 
     try:
         message = payload["entry"][0]["changes"][0]["value"]["messages"][0]
-    except (KeyError, IndexError):
+    except (KeyError, IndexError, TypeError):
         # Delivery/read receipts and other non-message events. Ignore.
         return JSONResponse({"status": "ignored"})
 
     patient_number = "+" + message["from"]
     body = message.get("text", {}).get("body", "")
-    print(f"[webhook] Inbound from {patient_number}: {body}")
+    ref = patient_ref(patient_number)
+    logger.info(
+        "inbound message patient=%s msg_id=%s type=%s",
+        ref, message.get("id"), message.get("type"),
+    )
 
     # Look up this patient's care plan by phone number.
     care_plan = get_care_plan(patient_number)
     if care_plan is None:
-        print(f"[webhook] No care plan on file for {patient_number} -- declining politely.")
+        logger.info("no care plan on file patient=%s -- declining politely", ref)
         reply_text = (
             "We don't have your discharge information on file yet. "
             "Please contact your care team to get registered."
         )
-        if os.getenv("META_WHATSAPP_TOKEN") and os.getenv("META_PHONE_NUMBER_ID"):
+        if _meta_configured():
             send_whatsapp_message(patient_number, reply_text)
         return JSONResponse({"status": "unregistered_patient"})
 
@@ -123,23 +164,20 @@ async def receive_message(request: Request):
     else:
         reply_text = "Got it, thanks for the update."
 
-    if os.getenv("META_WHATSAPP_TOKEN") and os.getenv("META_PHONE_NUMBER_ID"):
+    if _meta_configured():
         send_whatsapp_message(patient_number, reply_text)
-        print(f"[webhook] Sent real reply to {patient_number}")
+        logger.info("reply sent patient=%s escalated=%s", ref, bool(result.get("escalated")))
     else:
-        print(
-            f"[webhook] DRY RUN (no Meta credentials) -- would reply to "
-            f"{patient_number}:\n{reply_text}\n"
-        )
+        logger.info("DRY RUN (no Meta credentials): reply not sent patient=%s", ref)
 
     return JSONResponse({"status": "ok"})
 
 
 # ---------------------------------------------------------------------------
-# Admin intake
+# Admin intake (protected)
 # ---------------------------------------------------------------------------
 
-@app.get("/intake", response_class=HTMLResponse)
+@app.get("/intake", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 async def intake_form():
     return """
     <!DOCTYPE html>
@@ -150,8 +188,9 @@ async def intake_form():
         <p>Upload a discharge summary for a patient. Once registered, the
            patient can message on WhatsApp and get responses based on this plan.</p>
         <form action="/intake" method="post" enctype="multipart/form-data">
-            <label>Patient's WhatsApp number (with country code, e.g. +923166568948):</label><br>
+            <label>Patient's WhatsApp number (with country code):</label><br>
             <input type="text" name="phone_number" required
+                   placeholder="+92XXXXXXXXXX"
                    style="width: 100%; padding: 0.5rem; margin: 0.5rem 0;"><br>
             <label>Discharge summary (image or text file):</label><br>
             <input type="file" name="file" required
@@ -164,7 +203,7 @@ async def intake_form():
     """
 
 
-@app.post("/intake")
+@app.post("/intake", dependencies=[Depends(require_admin)])
 async def intake_submit(
     phone_number: str = Form(...),
     file: UploadFile = File(...),
@@ -188,16 +227,23 @@ async def intake_submit(
         language="en",
         phone_number=phone_number,
     )
-    print(f"[intake] Registered {phone_number} with diagnosis: {care_plan.diagnosis}")
+    # Never log the diagnosis or the full number.
+    logger.info("intake registered patient=%s", patient_ref(phone_number))
 
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
 # ---------------------------------------------------------------------------
-# Nurse dashboard
+# Nurse dashboard (protected)
 # ---------------------------------------------------------------------------
 
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/health")
+def health():
+    """Public liveness check for uptime monitors. Returns no data."""
+    return {"status": "ok"}
+
+
+@app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 def dashboard():
     escalations = get_escalations()
     all_messages = get_all_messages()
@@ -205,39 +251,41 @@ def dashboard():
     urgent = [r for r in escalations if str(r.get("priority", "")).lower() == "urgent"]
     low = [r for r in escalations if str(r.get("priority", "")).lower() != "urgent"]
 
+    # Patient messages and LLM output are untrusted: every value is escaped,
+    # otherwise a message like "<script>..." would run in the nurse's browser.
     def render_escalation_rows(rows, border_color):
         if not rows:
             return "<p><em>None.</em></p>"
-        html = []
+        out = []
         for r in rows:
-            html.append(f"""
+            out.append(f"""
             <div class="case" style="border-left-color: {border_color};">
-                <div><strong>Patient:</strong> {r.get('patient_id', '?')}
+                <div><strong>Patient:</strong> {_esc(r.get('patient_id', '?'))}
                      &nbsp;|&nbsp;
-                     <strong>Risk:</strong> {r.get('risk_level', 'n/a')}</div>
-                <div class="msg"><strong>Message:</strong> {r.get('content', '')}</div>
-                <div class="reason"><strong>Reason:</strong> {r.get('reasoning', '')}</div>
+                     <strong>Risk:</strong> {_esc(r.get('risk_level', 'n/a'))}</div>
+                <div class="msg"><strong>Message:</strong> {_esc(r.get('content', ''))}</div>
+                <div class="reason"><strong>Reason:</strong> {_esc(r.get('reasoning', ''))}</div>
             </div>
             """)
-        return "\n".join(html)
+        return "\n".join(out)
 
     def render_all_rows(rows):
         if not rows:
             return "<p><em>None.</em></p>"
-        html = []
+        out = []
         for r in rows:
-            html.append(f"""
+            out.append(f"""
             <div class="case" style="border-left-color: #90a4ae;">
-                <div><strong>Patient:</strong> {r.get('patient_id', '?')}
+                <div><strong>Patient:</strong> {_esc(r.get('patient_id', '?'))}
                      &nbsp;|&nbsp;
-                     <strong>Intent:</strong> {r.get('intent', '?')}
+                     <strong>Intent:</strong> {_esc(r.get('intent', '?'))}
                      &nbsp;|&nbsp;
-                     <strong>Escalated:</strong> {r.get('escalated', '?')}</div>
-                <div class="msg"><strong>Message:</strong> {r.get('content', '')}</div>
-                <div class="reason"><strong>Answer:</strong> {r.get('answer', '(none)')}</div>
+                     <strong>Escalated:</strong> {_esc(r.get('escalated', '?'))}</div>
+                <div class="msg"><strong>Message:</strong> {_esc(r.get('content', ''))}</div>
+                <div class="reason"><strong>Answer:</strong> {_esc(r.get('answer') or '(none)')}</div>
             </div>
             """)
-        return "\n".join(html)
+        return "\n".join(out)
 
     return f"""
     <!DOCTYPE html>
