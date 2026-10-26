@@ -12,11 +12,15 @@ The point: a good prompt reduces failures; code handles the failures that
 still happen. Prompts alone cannot make an LLM deterministic.
 """
 
+import logging
+
 from pydantic import BaseModel
 
 from config import require_api_key
 from graph.llm_provider import call_structured
 from graph.schemas import CarePlan, FlatCarePlan, Medication
+
+logger = logging.getLogger(__name__)
 
 
 EXTRACTION_SYSTEM_PROMPT = """You are a clinical document extraction assistant.
@@ -111,9 +115,10 @@ def _extract_with_retry(discharge_text: str) -> dict:
     except Exception as e:
         if "tool call validation failed" not in str(e):
             raise
-        print(
-            "[extract_care_plan] Primary call rejected by Groq's validator; "
-            "retrying with minimal schema..."
+        # Do NOT log the exception text: it can contain the model's raw output.
+        logger.warning(
+            "extract_care_plan: primary call rejected by Groq's validator; "
+            "retrying with minimal schema"
         )
 
     # Fallback: schema so loose that validation cannot fail.
@@ -171,9 +176,9 @@ def extract_care_plan_real(discharge_text: str) -> CarePlan:
         # discharge protocols regardless of diagnosis. A floor, not a
         # replacement for diagnosis-specific red flags a clinician
         # should still review and expand for real deployment.
-        print(
-            "[extract_care_plan] WARNING: no red flags found in document -- "
-            "applying generic safety-net red flags instead of leaving this empty."
+        logger.warning(
+            "extract_care_plan: no red flags found in document -- "
+            "applying generic safety-net red flags instead of leaving this empty"
         )
         care_plan.red_flags = [
             "fever",
