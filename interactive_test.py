@@ -21,7 +21,8 @@ from pathlib import Path
 
 from graph.build import build_graph
 from storage import init_db, get_escalations
-
+from safe_logging import setup_logging
+setup_logging()
 
 def _load_discharge(image_path: str) -> str:
     """Load a discharge summary either from an image (via vision) or a text file."""
