@@ -12,9 +12,26 @@ Escalation policy:
 Two entry paths:
   1. Admin intake   -> discharge_text is provided; extract_care_plan runs.
   2. WhatsApp reply -> care_plan is already loaded from DB; extraction is skipped.
+
+Logging rule: log WHAT HAPPENED, never WHAT WAS SAID. No message text,
+diagnoses, LLM replies or full phone numbers in logs or in push alerts.
 """
 
 import hashlib
+import logging
+import re
+
+from safe_logging import mask_phone
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_id(patient_id) -> str:
+    """Mask phone-number IDs; leave non-phone IDs (e.g. patient_001) alone."""
+    pid = str(patient_id or "unknown")
+    if len(re.sub(r"\D", "", pid)) >= 7:
+        return mask_phone(pid)
+    return pid
 
 
 # Module-level cache: hash(discharge_text) -> CarePlan.
@@ -27,7 +44,7 @@ def load_history(state: dict) -> dict:
     """Fetch the patient's recent message history before any LLM call."""
     from storage import get_recent_messages
     history = get_recent_messages(state["patient_id"], limit=20, days=7)
-    print(f"[load_history] Loaded {len(history)} prior messages.")
+    logger.info("load_history loaded=%d prior messages", len(history))
     return {"conversation_history": history}
 
 
@@ -39,21 +56,21 @@ def extract_care_plan(state: dict) -> dict:
     (admin intake path), extract and save it.
     """
     if state.get("care_plan") is not None:
-        print("[extract_care_plan] Care plan already loaded -- skipping extraction.")
+        logger.info("extract_care_plan skipped: care plan already loaded")
         return {}
 
     doc = state.get("discharge_text", "")
     if not doc:
-        print("[extract_care_plan] No care plan and no discharge text -- nothing to do.")
+        logger.info("extract_care_plan skipped: no care plan and no discharge text")
         return {}
 
     key = hashlib.sha256(doc.encode("utf-8")).hexdigest()
     cached = _CARE_PLAN_CACHE.get(key)
     if cached is not None:
-        print("[extract_care_plan] Using cached care plan (same document).")
+        logger.info("extract_care_plan using cached plan (same document)")
         return {"care_plan": cached}
 
-    print("[extract_care_plan] Reading discharge summary...")
+    logger.info("extract_care_plan reading discharge summary")
     from graph.extraction import extract_care_plan_real
     from storage import save_care_plan
 
@@ -69,17 +86,18 @@ def extract_care_plan(state: dict) -> dict:
 
 
 def classify_intent(state: dict) -> dict:
-    print("[classify_intent] Classifying intent...")
+    logger.info("classify_intent started")
     from graph.intent import classify_intent_real
     result = classify_intent_real(
         state["patient_message"],
         history=state.get("conversation_history", []),
     )
+    logger.info("classify_intent done intent=%s", result.intent)
     return {"intent": result.intent}
 
 
 def answer_question(state: dict) -> dict:
-    print("[answer_question] Generating grounded answer...")
+    logger.info("answer_question started")
     from graph.answering import answer_question_real
     from storage import log_message
 
@@ -103,6 +121,10 @@ def answer_question(state: dict) -> dict:
             f"grounded={result['grounded']}"
         ),
     )
+    logger.info(
+        "answer_question done source=%s grounded=%s",
+        result.get("source", "unknown"), result["grounded"],
+    )
 
     return {
         "answer": result["answer"],
@@ -112,7 +134,7 @@ def answer_question(state: dict) -> dict:
 
 
 def decline_off_topic(state: dict) -> dict:
-    print("[decline_off_topic] Politely declining non-medical question.")
+    logger.info("decline_off_topic: politely declining non-medical question")
     from storage import log_message
 
     reply = (
@@ -135,18 +157,22 @@ def decline_off_topic(state: dict) -> dict:
 
 
 def triage_symptom(state: dict) -> dict:
-    print("[triage_symptom] Assessing symptom risk...")
+    logger.info("triage_symptom started")
     from graph.triage import triage_symptom_real
     result = triage_symptom_real(
         state["patient_message"],
         state["care_plan"],
         history=state.get("conversation_history", []),
     )
+    logger.info("triage_symptom done risk=%s", result.risk_level)
     return {"risk_level": result.risk_level, "triage_reasoning": result.reasoning}
 
 
 def escalate(state: dict) -> dict:
-    print("[escalate] URGENT -- sending alert to nurse dashboard with full context.")
+    logger.info(
+        "escalate: urgent case logged to dashboard patient=%s",
+        _safe_id(state.get("patient_id")),
+    )
     from storage import log_message
     from pushover_notify import send_pushover_notification
 
@@ -160,19 +186,19 @@ def escalate(state: dict) -> dict:
         reasoning=state.get("triage_reasoning"),
     )
 
+    # The push alert goes through a third party, so it carries no symptom
+    # text and no full phone number. Details are on the (password-protected)
+    # dashboard.
     send_pushover_notification(
-        title=f"URGENT: {state.get('patient_id', 'unknown')}",
-        message=(
-            f"Patient: {state.get('patient_message', '')[:200]}\n"
-            f"Reason: {state.get('triage_reasoning', 'High-risk symptom')}"
-        ),
+        title=f"URGENT: patient {_safe_id(state.get('patient_id'))}",
+        message="High-risk symptom reported. Open the nurse dashboard for details.",
     )
 
     return {"escalated": True}
 
 
 def log_normal(state: dict) -> dict:
-    print("[log_normal] Low-risk -- logged, no nurse alert.")
+    logger.info("log_normal: low risk, logged, no nurse alert")
     from storage import log_message
 
     log_message(
