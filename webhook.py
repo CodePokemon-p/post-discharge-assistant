@@ -4,8 +4,11 @@ FastAPI webhook for Meta's WhatsApp Cloud API + Admin intake + Nurse dashboard.
 Architecture:
   * Admin uploads a discharge summary through /intake (with a phone number).
   * System extracts the care plan and saves it to the DB, keyed by phone.
-  * When that patient messages on WhatsApp, the webhook looks up their
-    care plan by phone number and runs the graph with it.
+  * When that patient messages on WhatsApp, the webhook answers Meta
+    IMMEDIATELY ("accepted"), then does the slow work (graph + reply) in
+    the background.
+  * Every WhatsApp message ID is claimed in the database first, so a
+    retry or duplicate from Meta is skipped (idempotency).
   * No files are read at startup. No hardcoded demo patient. Every
     WhatsApp sender is treated as their own patient.
 
@@ -15,6 +18,13 @@ SECURITY (Phase A):
   * GET /meta/webhook uses META_VERIFY_TOKEN (no default; must be set).
   * Logs never contain message text, care plans, diagnoses or full phone numbers.
   * Everything rendered on the dashboard is HTML-escaped.
+
+RELIABILITY (Phase B):
+  * Meta gets its "200 OK" in milliseconds; the graph runs afterwards.
+  * Duplicate deliveries are skipped via claim_message().
+  * If background processing fails, the failure is NOT silent: the message is
+    put on the dashboard as urgent, a nurse is alerted, and the patient gets
+    a safe fallback reply.
 
 RUNNING:
 1. uvicorn webhook:app --reload --port 8000
@@ -32,12 +42,13 @@ import json
 import logging
 import os
 import secrets
+import traceback
 
 from dotenv import load_dotenv
 
 load_dotenv()  # before any module that reads env vars at import time
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (
     PlainTextResponse,
     JSONResponse,
@@ -46,9 +57,18 @@ from fastapi.responses import (
 )
 
 from graph.build import build_graph
-from storage import init_db, get_care_plan, save_care_plan, get_escalations, get_all_messages
+from storage import (
+    init_db,
+    get_care_plan,
+    save_care_plan,
+    get_escalations,
+    get_all_messages,
+    claim_message,
+    log_message,
+)
 from messaging import send_whatsapp_message
-from safe_logging import patient_ref, setup_logging
+from pushover_notify import send_pushover_notification
+from safe_logging import mask_phone, patient_ref, setup_logging
 from security import require_admin, require_meta_signature
 
 setup_logging()
@@ -58,10 +78,15 @@ app = FastAPI()
 init_db()
 graph_app = build_graph()
 
+FALLBACK_REPLY = (
+    "Sorry, we couldn't process your message just now. A member of your care "
+    "team has been notified. If this is urgent or you feel very unwell, please "
+    "contact your care team or emergency services directly."
+)
 
-# ---------------------------------------------------------------------------
+
+
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _care_plan_to_text(care_plan) -> str:
     """
@@ -90,9 +115,9 @@ def _meta_configured() -> bool:
     return bool(os.getenv("META_WHATSAPP_TOKEN") and os.getenv("META_PHONE_NUMBER_ID"))
 
 
-# ---------------------------------------------------------------------------
+
 # Meta WhatsApp webhook
-# ---------------------------------------------------------------------------
+
 
 @app.get("/meta/webhook")
 async def verify_webhook(request: Request):
@@ -109,10 +134,114 @@ async def verify_webhook(request: Request):
     return PlainTextResponse("Verification failed", status_code=403)
 
 
-# Plain `def` (not async): FastAPI runs it in a threadpool, so the blocking
-# graph call and the WhatsApp send do not freeze the event loop.
+def _handle_processing_failure(message: dict, patient_number, body: str, error: Exception) -> None:
+    """
+    Background work failed AFTER we told Meta "200 OK", so Meta will not retry.
+    That means a failure here would be completely silent -- and the lost
+    message might be an emergency. So fail toward safety:
+      1. record it on the dashboard as urgent (a human must look at it),
+      2. alert a nurse,
+      3. give the patient a safe fallback reply.
+    Logs carry only the error type and where it happened -- never content.
+    """
+    tb = traceback.extract_tb(error.__traceback__)
+    where = f"{os.path.basename(tb[-1].filename)}:{tb[-1].lineno}" if tb else "unknown"
+    ref = patient_ref(patient_number) if patient_number else "unknown"
+    logger.error(
+        "processing failed msg_id=%s patient=%s type=%s at=%s",
+        message.get("id"), ref, type(error).__name__, where,
+    )
+
+    if patient_number:
+        try:
+            log_message(
+                patient_id=patient_number,
+                content=body,
+                escalated=True,
+                priority="urgent",
+                reasoning="Automatic processing failed -- needs human review.",
+            )
+        except Exception as e:
+            logger.warning("could not record failed message for review type=%s", type(e).__name__)
+
+    # Never raises (see pushover_notify.py).
+    send_pushover_notification(
+        title=f"URGENT: message needs manual review (patient {mask_phone(patient_number or '')})",
+        message="Automatic processing failed. Open the nurse dashboard for details.",
+    )
+
+    if patient_number and _meta_configured():
+        try:
+            send_whatsapp_message(patient_number, FALLBACK_REPLY)
+        except Exception as e:
+            logger.warning("could not send fallback reply patient=%s type=%s", ref, type(e).__name__)
+
+
+def process_message(message: dict) -> None:
+    """
+    The slow part: look up the care plan, run the graph, send the reply.
+    Runs in the background after Meta has already been answered. Never raises.
+    """
+    patient_number = None
+    body = ""
+    try:
+        patient_number = "+" + message["from"]
+        body = message.get("text", {}).get("body", "")
+        ref = patient_ref(patient_number)
+        logger.info(
+            "processing message patient=%s msg_id=%s type=%s",
+            ref, message.get("id"), message.get("type"),
+        )
+
+        # Look up this patient's care plan by phone number.
+        care_plan = get_care_plan(patient_number)
+        if care_plan is None:
+            logger.info("no care plan on file patient=%s -- declining politely", ref)
+            reply_text = (
+                "We don't have your discharge information on file yet. "
+                "Please contact your care team to get registered."
+            )
+            if _meta_configured():
+                send_whatsapp_message(patient_number, reply_text)
+            return
+
+        # Run the graph with the stored care plan. No file reads, no demo data.
+        result = graph_app.invoke({
+            "patient_id": patient_number,
+            "care_plan": care_plan,                           # already loaded from DB
+            "discharge_text": _care_plan_to_text(care_plan),  # reconstructed for the answer agent
+            "patient_message": body,
+            "language": "en",
+        })
+
+        if result.get("answer"):
+            reply_text = result["answer"]
+        elif result.get("escalated"):
+            reply_text = (
+                "Thanks for letting us know. We've flagged this for your "
+                "care team to review, and someone will follow up with you soon."
+            )
+        else:
+            reply_text = "Got it, thanks for the update."
+
+        if _meta_configured():
+            send_whatsapp_message(patient_number, reply_text)
+            logger.info("reply sent patient=%s escalated=%s", ref, bool(result.get("escalated")))
+        else:
+            logger.info("DRY RUN (no Meta credentials): reply not sent patient=%s", ref)
+
+    except Exception as e:
+        _handle_processing_failure(message, patient_number, body, e)
+
+
+# Plain `def` (not async): FastAPI runs it in a threadpool, and the background
+# task (also a plain function) runs in the threadpool too, so neither the
+# database call here nor the slow graph call freezes the event loop.
 @app.post("/meta/webhook")
-def receive_message(raw: bytes = Depends(require_meta_signature)):
+def receive_message(
+    background: BackgroundTasks,
+    raw: bytes = Depends(require_meta_signature),
+):
     # `raw` is the signature-verified request body.
     try:
         payload = json.loads(raw)
@@ -125,57 +254,25 @@ def receive_message(raw: bytes = Depends(require_meta_signature)):
         # Delivery/read receipts and other non-message events. Ignore.
         return JSONResponse({"status": "ignored"})
 
-    patient_number = "+" + message["from"]
-    body = message.get("text", {}).get("body", "")
-    ref = patient_ref(patient_number)
-    logger.info(
-        "inbound message patient=%s msg_id=%s type=%s",
-        ref, message.get("id"), message.get("type"),
-    )
+    message_id = message.get("id")
+    if not message_id:
+        logger.warning("webhook message without an id -- ignored")
+        return JSONResponse({"status": "ignored"})
 
-    # Look up this patient's care plan by phone number.
-    care_plan = get_care_plan(patient_number)
-    if care_plan is None:
-        logger.info("no care plan on file patient=%s -- declining politely", ref)
-        reply_text = (
-            "We don't have your discharge information on file yet. "
-            "Please contact your care team to get registered."
-        )
-        if _meta_configured():
-            send_whatsapp_message(patient_number, reply_text)
-        return JSONResponse({"status": "unregistered_patient"})
+    # Idempotency: claim this message ID. If the database is down this raises,
+    # the route returns 500, and Meta retries later -- which is what we want,
+    # because we have NOT accepted the message.
+    if not claim_message(message_id):
+        logger.info("duplicate message skipped msg_id=%s", message_id)
+        return JSONResponse({"status": "duplicate"})
 
-    # Run the graph with the stored care plan. No file reads, no demo data.
-    result = graph_app.invoke({
-        "patient_id": patient_number,
-        "care_plan": care_plan,                       # already loaded from DB
-        "discharge_text": _care_plan_to_text(care_plan),  # reconstructed for the answer agent
-        "patient_message": body,
-        "language": "en",
-    })
-
-    if result.get("answer"):
-        reply_text = result["answer"]
-    elif result.get("escalated"):
-        reply_text = (
-            "Thanks for letting us know. We've flagged this for your "
-            "care team to review, and someone will follow up with you soon."
-        )
-    else:
-        reply_text = "Got it, thanks for the update."
-
-    if _meta_configured():
-        send_whatsapp_message(patient_number, reply_text)
-        logger.info("reply sent patient=%s escalated=%s", ref, bool(result.get("escalated")))
-    else:
-        logger.info("DRY RUN (no Meta credentials): reply not sent patient=%s", ref)
-
-    return JSONResponse({"status": "ok"})
+    background.add_task(process_message, message)
+    return JSONResponse({"status": "accepted"})
 
 
-# ---------------------------------------------------------------------------
+
 # Admin intake (protected)
-# ---------------------------------------------------------------------------
+
 
 @app.get("/intake", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 async def intake_form():
@@ -233,9 +330,9 @@ async def intake_submit(
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
-# ---------------------------------------------------------------------------
+
 # Nurse dashboard (protected)
-# ---------------------------------------------------------------------------
+
 
 @app.get("/health")
 def health():

@@ -17,6 +17,10 @@ from graph.schemas import CarePlan
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Meta retries undelivered webhooks for up to ~7 days, so remember message
+# IDs for longer than that, then forget them so the table stays small.
+PROCESSED_MESSAGE_RETENTION_DAYS = 14
+
 
 def _get_conn():
     """Open a new Postgres connection with dict-style row access."""
@@ -57,7 +61,43 @@ def init_db() -> None:
                     FOREIGN KEY (patient_id) REFERENCES patients (patient_id)
                 )
             """)
+            # Idempotency: one row per WhatsApp message ID we have accepted.
+            # The PRIMARY KEY is what makes "claim" atomic.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS processed_messages (
+                    message_id TEXT PRIMARY KEY,
+                    received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Forget old message IDs (housekeeping, runs at startup).
+            cur.execute(
+                "DELETE FROM processed_messages "
+                "WHERE received_at < NOW() - make_interval(days => %s)",
+                (PROCESSED_MESSAGE_RETENTION_DAYS,),
+            )
         conn.commit()
+
+
+def claim_message(message_id: str) -> bool:
+    """
+    Try to claim a WhatsApp message ID for processing.
+
+    Returns True  -> first time we've seen this ID: go ahead and process it.
+    Returns False -> already claimed (Meta retry or duplicate): skip it.
+
+    It is a single INSERT ... ON CONFLICT DO NOTHING, so even if two copies
+    of the same message arrive at the same instant, exactly one wins.
+    """
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO processed_messages (message_id) VALUES (%s) "
+                "ON CONFLICT (message_id) DO NOTHING",
+                (message_id,),
+            )
+            claimed = cur.rowcount == 1
+        conn.commit()
+    return claimed
 
 
 def save_care_plan(
