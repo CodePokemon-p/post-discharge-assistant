@@ -61,6 +61,7 @@ from graph.build import build_graph
 from storage import (
     init_db,
     get_care_plan,
+    get_discharge_text,
     save_care_plan,
     get_escalations,
     get_all_messages,
@@ -259,12 +260,19 @@ def process_message(message: dict) -> None:
                 send_whatsapp_message(patient_number, reply_text)
             return
 
+        # The answering agent should see the WHOLE original document (diet,
+        # activity, precautions...). Patients registered before we stored it
+        # fall back to the short summary rebuilt from the care plan.
+        stored_text = get_discharge_text(patient_number)
+        logger.info("answer agent will use the %s discharge text",
+                    "full stored" if stored_text else "rebuilt-from-care-plan")
+
         # Run the graph with the stored care plan. No file reads, no demo data.
         t = time.perf_counter()
         result = graph_app.invoke({
             "patient_id": patient_number,
-            "care_plan": care_plan,                           # already loaded from DB
-            "discharge_text": _care_plan_to_text(care_plan),  # reconstructed for the answer agent
+            "care_plan": care_plan,                                # already loaded from DB
+            "discharge_text": stored_text or _care_plan_to_text(care_plan),
             "patient_message": body,
             "language": "en",
         })
@@ -384,6 +392,7 @@ async def intake_submit(
         care_plan,
         language="en",
         phone_number=phone_number,
+        discharge_text=discharge_text,   # keep the whole document for the answering agent
     )
     # Never log the diagnosis or the full number.
     logger.info("intake registered patient=%s", patient_ref(phone_number))

@@ -45,6 +45,10 @@ def init_db() -> None:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # The full discharge text, kept so the answering agent can see the
+            # WHOLE document (diet, activity, precautions...), not just the few
+            # fields the care plan extracted. Added safely to existing databases.
+            cur.execute("ALTER TABLE patients ADD COLUMN IF NOT EXISTS discharge_text TEXT")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
@@ -105,6 +109,7 @@ def save_care_plan(
     care_plan: CarePlan,
     language: str = "en",
     phone_number: Optional[str] = None,
+    discharge_text: Optional[str] = None,
 ) -> None:
     with _get_conn() as conn:
         with conn.cursor() as cur:
@@ -118,14 +123,17 @@ def save_care_plan(
 
             cur.execute(
                 """
-                INSERT INTO patients (patient_id, care_plan_json, language, phone_number)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO patients
+                    (patient_id, care_plan_json, language, phone_number, discharge_text)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (patient_id) DO UPDATE SET
                     care_plan_json = EXCLUDED.care_plan_json,
                     language = EXCLUDED.language,
-                    phone_number = EXCLUDED.phone_number
+                    phone_number = EXCLUDED.phone_number,
+                    -- callers that don't pass the text must not erase a stored one
+                    discharge_text = COALESCE(EXCLUDED.discharge_text, patients.discharge_text)
                 """,
-                (patient_id, care_plan.model_dump_json(), language, phone_number),
+                (patient_id, care_plan.model_dump_json(), language, phone_number, discharge_text),
             )
         conn.commit()
 
@@ -141,6 +149,18 @@ def get_care_plan(patient_id: str) -> Optional[CarePlan]:
     if row is None:
         return None
     return CarePlan(**json.loads(row["care_plan_json"]))
+
+
+def get_discharge_text(patient_id: str) -> Optional[str]:
+    """The full original discharge text, or None for patients registered before this existed."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT discharge_text FROM patients WHERE patient_id = %s",
+                (patient_id,),
+            )
+            row = cur.fetchone()
+    return row["discharge_text"] if row else None
 
 
 def get_all_patients() -> list[dict]:
