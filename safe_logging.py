@@ -35,6 +35,36 @@ def patient_ref(number: str) -> str:
     return hmac.new(secret.encode(), digits.encode(), hashlib.sha256).hexdigest()[:10]
 
 
+def short_id(value) -> str:
+    """Short, non-reversible tag for IDs that may hide a phone number.
+
+    WhatsApp message IDs (wamid.XXXX) embed the sender's phone number in
+    base64, so logging them raw leaks the number. Log this instead.
+    """
+    return hashlib.sha256(str(value or "").encode()).hexdigest()[:10]
+
+
+_SECRET_PARAM_RE = re.compile(r"(verify_token=)[^&\s\"]+")
+
+
+class RedactSecretsFilter(logging.Filter):
+    """Hide Meta's verify token, which uvicorn's access log prints in the URL.
+
+    uvicorn formats access lines from a 5-item args tuple, so the tuple
+    shape must be kept (only the strings inside are changed).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = _SECRET_PARAM_RE.sub(r"\1***", record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _SECRET_PARAM_RE.sub(r"\1***", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        return True
+
+
 class RedactPhoneFilter(logging.Filter):
     """Replace anything that looks like a phone number in the final log message."""
 
@@ -52,6 +82,8 @@ def setup_logging() -> None:
     )
     for handler in logging.getLogger().handlers:
         handler.addFilter(RedactPhoneFilter())
+    # uvicorn's access log prints full URLs, including Meta's verify token.
+    logging.getLogger("uvicorn.access").addFilter(RedactSecretsFilter())
     # HTTP client libraries log full request URLs at INFO; keep them quiet.
     for noisy in ("httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import secrets
+import time
 import traceback
 
 from dotenv import load_dotenv
@@ -68,7 +69,7 @@ from storage import (
 )
 from messaging import send_whatsapp_message
 from pushover_notify import send_pushover_notification
-from safe_logging import mask_phone, patient_ref, setup_logging
+from safe_logging import mask_phone, patient_ref, setup_logging, short_id
 from security import require_admin, require_meta_signature
 
 setup_logging()
@@ -85,8 +86,9 @@ FALLBACK_REPLY = (
 )
 
 
-
+# ---------------------------------------------------------------------------
 # Helpers
+# ---------------------------------------------------------------------------
 
 def _care_plan_to_text(care_plan) -> str:
     """
@@ -115,9 +117,9 @@ def _meta_configured() -> bool:
     return bool(os.getenv("META_WHATSAPP_TOKEN") and os.getenv("META_PHONE_NUMBER_ID"))
 
 
-
+# ---------------------------------------------------------------------------
 # Meta WhatsApp webhook
-
+# ---------------------------------------------------------------------------
 
 @app.get("/meta/webhook")
 async def verify_webhook(request: Request):
@@ -134,23 +136,71 @@ async def verify_webhook(request: Request):
     return PlainTextResponse("Verification failed", status_code=403)
 
 
-def _handle_processing_failure(message: dict, patient_number, body: str, error: Exception) -> None:
+def _http_error_details(error: Exception) -> str:
+    """
+    For failed HTTP calls (e.g. the WhatsApp send), return the status code and
+    Meta's numeric error code -- enough to diagnose "token expired" (401 / 190)
+    without logging Meta's message text, which can contain private details.
+    """
+    response = getattr(error, "response", None)
+    if response is None:
+        return ""
+    parts = [f" http_status={getattr(response, 'status_code', '?')}"]
+    try:
+        code = response.json().get("error", {}).get("code")
+        if code is not None:
+            parts.append(f" meta_error_code={code}")
+    except Exception:
+        pass
+    return "".join(parts)
+
+
+def _handle_processing_failure(
+    message: dict, patient_number, body: str, error: Exception, result=None
+) -> None:
     """
     Background work failed AFTER we told Meta "200 OK", so Meta will not retry.
     That means a failure here would be completely silent -- and the lost
-    message might be an emergency. So fail toward safety:
-      1. record it on the dashboard as urgent (a human must look at it),
-      2. alert a nurse,
-      3. give the patient a safe fallback reply.
-    Logs carry only the error type and where it happened -- never content.
+    message might be an emergency. What we do depends on HOW FAR we got:
+
+      * The graph never finished (result is None): we don't know how risky the
+        message was, so fail toward safety:
+          1. record it on the dashboard as urgent,
+          2. alert a nurse,
+          3. give the patient a safe fallback reply.
+      * The graph finished but sending the reply failed (result is set): triage
+        already ran. If it was urgent, the nurse was already alerted -- do NOT
+        alert twice. If it was a normal answer, flag it on the dashboard as low
+        priority so someone knows the patient never got their reply.
+
+    Logs carry only the error type, where it happened and HTTP status codes --
+    never content.
     """
     tb = traceback.extract_tb(error.__traceback__)
     where = f"{os.path.basename(tb[-1].filename)}:{tb[-1].lineno}" if tb else "unknown"
     ref = patient_ref(patient_number) if patient_number else "unknown"
     logger.error(
-        "processing failed msg_id=%s patient=%s type=%s at=%s",
-        message.get("id"), ref, type(error).__name__, where,
+        "processing failed msg=%s patient=%s type=%s at=%s%s",
+        short_id(message.get("id")), ref, type(error).__name__, where,
+        _http_error_details(error),
     )
+
+    if result is not None:
+        if result.get("escalated"):
+            logger.warning("reply not delivered, nurse was already alerted patient=%s", ref)
+            return
+        if patient_number:
+            try:
+                log_message(
+                    patient_id=patient_number,
+                    content=body,
+                    escalated=True,
+                    priority="low",
+                    reasoning="Reply could not be delivered to the patient -- consider contacting them.",
+                )
+            except Exception as e:
+                logger.warning("could not record undelivered reply type=%s", type(e).__name__)
+        return
 
     if patient_number:
         try:
@@ -184,17 +234,21 @@ def process_message(message: dict) -> None:
     """
     patient_number = None
     body = ""
+    result = None
+    started = time.perf_counter()
     try:
         patient_number = "+" + message["from"]
         body = message.get("text", {}).get("body", "")
         ref = patient_ref(patient_number)
         logger.info(
-            "processing message patient=%s msg_id=%s type=%s",
-            ref, message.get("id"), message.get("type"),
+            "processing message patient=%s msg=%s type=%s",
+            ref, short_id(message.get("id")), message.get("type"),
         )
 
         # Look up this patient's care plan by phone number.
+        t = time.perf_counter()
         care_plan = get_care_plan(patient_number)
+        logger.info("care plan lookup took %.1fs", time.perf_counter() - t)
         if care_plan is None:
             logger.info("no care plan on file patient=%s -- declining politely", ref)
             reply_text = (
@@ -206,6 +260,7 @@ def process_message(message: dict) -> None:
             return
 
         # Run the graph with the stored care plan. No file reads, no demo data.
+        t = time.perf_counter()
         result = graph_app.invoke({
             "patient_id": patient_number,
             "care_plan": care_plan,                           # already loaded from DB
@@ -213,6 +268,7 @@ def process_message(message: dict) -> None:
             "patient_message": body,
             "language": "en",
         })
+        logger.info("graph took %.1fs", time.perf_counter() - t)
 
         if result.get("answer"):
             reply_text = result["answer"]
@@ -225,13 +281,18 @@ def process_message(message: dict) -> None:
             reply_text = "Got it, thanks for the update."
 
         if _meta_configured():
+            t = time.perf_counter()
             send_whatsapp_message(patient_number, reply_text)
-            logger.info("reply sent patient=%s escalated=%s", ref, bool(result.get("escalated")))
+            logger.info(
+                "reply sent patient=%s escalated=%s (whatsapp send took %.1fs)",
+                ref, bool(result.get("escalated")), time.perf_counter() - t,
+            )
         else:
             logger.info("DRY RUN (no Meta credentials): reply not sent patient=%s", ref)
+        logger.info("message handled in %.1fs total", time.perf_counter() - started)
 
     except Exception as e:
-        _handle_processing_failure(message, patient_number, body, e)
+        _handle_processing_failure(message, patient_number, body, e, result)
 
 
 # Plain `def` (not async): FastAPI runs it in a threadpool, and the background
@@ -263,16 +324,16 @@ def receive_message(
     # the route returns 500, and Meta retries later -- which is what we want,
     # because we have NOT accepted the message.
     if not claim_message(message_id):
-        logger.info("duplicate message skipped msg_id=%s", message_id)
+        logger.info("duplicate message skipped msg=%s", short_id(message_id))
         return JSONResponse({"status": "duplicate"})
 
     background.add_task(process_message, message)
     return JSONResponse({"status": "accepted"})
 
 
-
+# ---------------------------------------------------------------------------
 # Admin intake (protected)
-
+# ---------------------------------------------------------------------------
 
 @app.get("/intake", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 async def intake_form():
@@ -330,9 +391,9 @@ async def intake_submit(
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
-
+# ---------------------------------------------------------------------------
 # Nurse dashboard (protected)
-
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -389,6 +450,7 @@ def dashboard():
     <html>
     <head>
         <title>Nurse Dashboard</title>
+        <meta http-equiv="refresh" content="30">
         <style>
             body {{ font-family: sans-serif; margin: 2rem; background: #f7f7f9; }}
             h1 {{ color: #1a237e; }}
