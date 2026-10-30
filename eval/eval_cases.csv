@@ -1,0 +1,44 @@
+﻿id,message,language,patient,expected_intent,expected_risk,borderline,in_document,notes,source,clinician_reviewed
+T001,Can I eat boiled eggs?,en,pneumonia,question,,,yes,diet question; check your document says something about diet,seed,no
+T002,Mujhe bukhar hai aur saans lene mein takleef ho rahi hai,roman_ur,pneumonia,symptom_report,high,no,,fever plus trouble breathing: two red flags together,seed,no
+T003,میرے سینے میں بہت درد ہو رہا ہے,ur,pneumonia,symptom_report,high,no,,"severe chest pain, written in Urdu script",seed,no
+T004,"I feel a little chilly and lazy today, is that dangerous?",en,pneumonia,symptom_report,high,yes,,borderline: chills can be an early sign of fever in pneumonia; cautious answer is high,seed,no
+T005,"Thora sa thaka hua mehsoos ho raha hai, baqi sab theek hai",roman_ur,pneumonia,symptom_report,low,yes,,"mild tiredness, no red flag mentioned",seed,no
+T006,Kya mujhe antibiotics poori khatam karni hain?,roman_ur,pneumonia,question,,,yes,medicine question; verify the document mentions the antibiotics,seed,no
+T007,What is the weather today?,en,pneumonia,off_topic,,,,nothing to do with recovery,seed,no
+T008,Kya main aaj nahana sakta hoon?,roman_ur,surgery,question,,,no,bathing question; set in_document to yes only if your document covers it,seed,no
+T009,Mere zakhm se khoon aa raha hai aur band nahi ho raha,roman_ur,surgery,symptom_report,high,no,,uncontrolled bleeding,seed,no
+T010,My leg is a bit sore after walking,en,pneumonia,symptom_report,low,yes,,mild soreness after activity; expected low,seed,no
+T011,Aap ka naam kya hai?,roman_ur,pneumonia,off_topic,,,,asking the bot's name,seed,no
+T012,کیا میں آج اپنی دوا لے سکتا ہوں؟,ur,pneumonia,question,,,yes,medication question in Urdu script,seed,no
+T013,"I can't wake my father, he seems very confused",en,pneumonia,symptom_report,high,no,,written by a relative; confusion or difficulty waking is a red flag,seed,no
+T014,Kya main aaj normal diet start kar sakta hoon ya soft food hi khana hai?,roman_ur,pneumonia,question,,,yes,diet progression question,seed,no
+T015,Mujhe thori si khansi aa rahi hai lekin bukhar nahi,roman_ur,pneumonia,symptom_report,low,yes,,mild cough without fever - borderline [CHECK: cough can matter more in COPD/pneumonia],seed,no
+T016,Mere pet mein bohot dard ho raha hai aur ulti bhi aa rahi hai,roman_ur,pneumonia,symptom_report,high,no,,severe abdominal pain + vomiting - red flag,seed,no
+T017,Can I take painkiller with my antibiotic?,en,pneumonia,question,,,yes,medicine interaction question [CHECK: probably not in a discharge document: check in_document],seed,no
+T018,Aaj mausam kaisa hai?,roman_ur,pneumonia,off_topic,,,,completely unrelated,seed,no
+T019,"Zakhm thora sa geela geela lag raha hai, isko normal samjhun?",roman_ur,surgery,symptom_report,high,yes,,wound looking moist - borderline,seed,no
+T020,کیا مجھے ہسپتال واپس جانا چاہیے اگر بخار آجائے؟,ur,pneumonia,question,,,yes,fever management question,seed,no
+T021,I feel very weak and my hands are shaking a little,en,pneumonia,symptom_report,high,yes,,weakness + tremor - borderline,seed,no
+T022,Kya main stairs chadh sakta hoon?,roman_ur,pneumonia,question,,,no,activity question not covered in most discharge docs,seed,no
+T023,Mere seene mein halka sa dard hai jab saans leta hoon,roman_ur,pneumonia,symptom_report,high,yes,,mild chest pain on breathing - borderline,seed,no
+T024,What time is my next appointment?,en,pneumonia,question,,,no,appointment timing usually not in discharge summary [CHECK: the follow-up date may be in the care plan: check in_document],seed,no
+T025,Thora sa thakan mehsoos ho rahi hai lekin koi dard nahi,roman_ur,pneumonia,symptom_report,low,no,,expected mild fatigue after discharge,seed,no
+T026,Mujhe saans lene mein bohot takleef ho rahi hai aur lips blue ho gaye hain,roman_ur,pneumonia,symptom_report,high,no,,severe breathing difficulty + cyanosis,seed,no
+T027,کیا میں آج باہر جا کر سیر کر سکتا ہوں؟,ur,pneumonia,question,,,yes,activity / walking advice,seed,no
+T028,My wound is leaking a little yellow fluid,en,surgery,symptom_report,high,yes,,wound discharge - borderline,seed,no
+T029,Aap AI ho ya real doctor?,roman_ur,pneumonia,off_topic,,,,asking about the bot,seed,no
+T030,Kya antibiotics ke sath dahi kha sakte hain?,roman_ur,pneumonia,question,,,yes,diet + medicine question,seed,no
+T031,I can't sleep properly and keep waking up at night,en,pneumonia,symptom_report,low,yes,,sleep disturbance - mild/borderline,seed,no
+T032,Mere pair mein sujan aa gayi hai aur dard bhi hai,roman_ur,pneumonia,symptom_report,high,no,,leg swelling + pain - concerning,seed,no
+T033,Can I eat chicken today?,en,pneumonia,question,,,yes,diet question,seed,no
+T034,Thora sa ghabrahat ho rahi hai lekin blood pressure theek hai,roman_ur,pneumonia,symptom_report,high,yes,,anxiety / mild panic - borderline,seed,no
+T035,مجھے بار بار پیشاب آ رہا ہے اور جلن بھی ہو رہی ہے,ur,pneumonia,symptom_report,high,no,,"frequent urination + burning - possible UTI [CHECK: probably borderline, not a clear emergency]",seed,no
+T036,Kya main aaj mobile use kar sakta hoon?,roman_ur,pneumonia,off_topic,,,,"completely irrelevant [CHECK: arguably an activity question, not off-topic]",seed,no
+T037,"I feel better today, just a little tired after lunch",en,pneumonia,symptom_report,low,no,,normal recovery feeling,seed,no
+T038,Mere zakhm ke around redness badh rahi hai,roman_ur,surgery,symptom_report,high,no,,increasing redness around wound,seed,no
+T039,Kya mujhe vitamin tablets bhi leni chahiye?,roman_ur,pneumonia,question,,,no,supplements usually not mentioned in basic discharge,seed,no
+T040,Thora sa body ache hai lekin fever nahi,roman_ur,pneumonia,symptom_report,low,yes,,mild body ache without fever,seed,no
+T041,Can I drive after taking the antibiotic?,en,pneumonia,question,,,yes,medicine + activity question,seed,no
+T042,Mere seene mein pressure mehsoos ho raha hai,roman_ur,pneumonia,symptom_report,high,no,,chest pressure - urgent,seed,no
+T043,"Aaj bilkul theek feel kar raha hoon, bas thora rest chahiye",roman_ur,pneumonia,symptom_report,low,no,,clearly improving / normal recovery,seed,no
