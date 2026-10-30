@@ -41,6 +41,7 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import traceback
@@ -49,7 +50,9 @@ from dotenv import load_dotenv
 
 load_dotenv()  # before any module that reads env vars at import time
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import (
+    BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile,
+)
 from fastapi.responses import (
     PlainTextResponse,
     JSONResponse,
@@ -79,6 +82,20 @@ logger = logging.getLogger("webhook")
 app = FastAPI()
 init_db()
 graph_app = build_graph()
+
+# WhatsApp message types that need no answer at all.
+IGNORED_MESSAGE_TYPES = {"reaction", "sticker", "system"}
+
+UNSUPPORTED_REPLY = (
+    "Sorry, I can only read text messages right now. Please type your message. "
+    "If it is urgent or you feel very unwell, please contact your care team or "
+    "emergency services directly."
+)
+
+# Intake limits.
+ALLOWED_UPLOADS = (".txt", ".jpg", ".jpeg", ".png")
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+_PHONE_RE = re.compile(r"^\+\d{10,15}$")
 
 FALLBACK_REPLY = (
     "Sorry, we couldn't process your message just now. A member of your care "
@@ -240,11 +257,17 @@ def process_message(message: dict) -> None:
     try:
         patient_number = "+" + message["from"]
         body = message.get("text", {}).get("body", "")
+        msg_type = message.get("type", "text")
         ref = patient_ref(patient_number)
         logger.info(
             "processing message patient=%s msg=%s type=%s",
-            ref, short_id(message.get("id")), message.get("type"),
+            ref, short_id(message.get("id")), msg_type,
         )
+
+        # Emoji reactions, stickers and system notices need no reply at all.
+        if msg_type in IGNORED_MESSAGE_TYPES:
+            logger.info("message type %s needs no reply -- ignored", msg_type)
+            return
 
         # Look up this patient's care plan by phone number.
         t = time.perf_counter()
@@ -258,6 +281,24 @@ def process_message(message: dict) -> None:
             )
             if _meta_configured():
                 send_whatsapp_message(patient_number, reply_text)
+            return
+
+        # Voice notes, photos, documents, locations...: we cannot read these, and
+        # running the graph on an empty message could hide a real emergency. So:
+        # tell the patient to type it, and put a low-priority note on the
+        # dashboard so a nurse knows something unreadable arrived.
+        if msg_type != "text":
+            logger.info("unsupported message type=%s patient=%s", msg_type, ref)
+            log_message(
+                patient_id=patient_number,
+                content=f"[{msg_type} message - the assistant cannot read this type]",
+                intent="unsupported_type",
+                escalated=True,
+                priority="low",
+                reasoning="Patient sent a non-text message the assistant cannot read -- consider checking in.",
+            )
+            if _meta_configured():
+                send_whatsapp_message(patient_number, UNSUPPORTED_REPLY)
             return
 
         # The answering agent should see the WHOLE original document (diet,
@@ -369,15 +410,34 @@ async def intake_form():
     """
 
 
+# Plain `def` (not async): registering a patient makes slow LLM calls, which
+# would freeze the whole server -- including the WhatsApp webhook -- if they
+# ran on the event loop.
 @app.post("/intake", dependencies=[Depends(require_admin)])
-async def intake_submit(
+def intake_submit(
     phone_number: str = Form(...),
     file: UploadFile = File(...),
 ):
     from graph.extraction import extract_care_plan_real, extract_text_from_image
 
-    content = await file.read()
+    # The patient is matched by this exact number, so insist on one clean format.
+    phone_number = re.sub(r"[\s\-()]", "", phone_number)
+    if not _PHONE_RE.match(phone_number):
+        raise HTTPException(
+            status_code=400,
+            detail="Phone number must be in international format, e.g. +92XXXXXXXXXX",
+        )
+
     filename = (file.filename or "").lower()
+    if not filename.endswith(ALLOWED_UPLOADS):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Upload a .txt, .jpg, .jpeg or .png file.",
+        )
+
+    content = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (limit is 10 MB).")
 
     if filename.endswith((".jpg", ".jpeg", ".png")):
         mime = "image/jpeg" if filename.endswith((".jpg", ".jpeg")) else "image/png"
