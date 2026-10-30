@@ -5,12 +5,14 @@ All functions keep identical signatures to the SQLite version, so no
 caller needs to change. Connection is read from DATABASE_URL env var.
 """
 
+import atexit
 import json
 import os
+import threading
 from typing import Optional
 
-import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from graph.schemas import CarePlan
 
@@ -22,14 +24,50 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 PROCESSED_MESSAGE_RETENTION_DAYS = 14
 
 
+# A small pool of ready-to-use database connections. Opening a fresh connection
+# to a remote database costs about a second EVERY time (and can stall for much
+# longer when a free-tier database is waking up). The pool opens them once and
+# reuses them, so a query takes milliseconds.
+_pool: Optional[ConnectionPool] = None
+_pool_lock = threading.Lock()
+
+
+def _get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                if not DATABASE_URL:
+                    raise RuntimeError(
+                        "DATABASE_URL is not set. Add it to .env, e.g.\n"
+                        "DATABASE_URL=postgresql://user:password@host:5432/dbname"
+                    )
+                pool = ConnectionPool(
+                    DATABASE_URL,
+                    min_size=1,
+                    max_size=5,
+                    kwargs={"row_factory": dict_row, "connect_timeout": 10},
+                    # Test a connection before handing it out. Free-tier databases
+                    # drop idle connections; without this a dead one would cause
+                    # an error on the next message.
+                    check=ConnectionPool.check_connection,
+                    max_lifetime=1800,
+                    timeout=15,       # wait at most 15s for a free connection
+                    open=False,
+                )
+                pool.open()           # starts connecting in the background
+                atexit.register(pool.close)
+                _pool = pool
+    return _pool
+
+
 def _get_conn():
-    """Open a new Postgres connection with dict-style row access."""
-    if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL is not set. Add it to .env, e.g.\n"
-            "DATABASE_URL=postgresql://user:password@host:5432/dbname"
-        )
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    """
+    Borrow a connection from the pool (dict-style rows). Used exactly like
+    before: `with _get_conn() as conn:` -- on exit the connection goes back to
+    the pool instead of being closed.
+    """
+    return _get_pool().connection()
 
 
 def init_db() -> None:
