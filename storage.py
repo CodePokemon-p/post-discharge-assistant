@@ -103,6 +103,7 @@ def init_db() -> None:
                     FOREIGN KEY (patient_id) REFERENCES patients (patient_id)
                 )
             """)
+            cur.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS resolved BOOLEAN DEFAULT FALSE")
             # Idempotency: one row per WhatsApp message ID we have accepted.
             # The PRIMARY KEY is what makes "claim" atomic.
             cur.execute("""
@@ -241,11 +242,12 @@ def log_message(
 
 
 def get_escalations() -> list[dict]:
-    """All escalated messages, urgent first, then newest within each tier."""
+    """All UNRESOLVED escalated messages, urgent first, then newest."""
     with _get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT * FROM messages WHERE escalated = 1
+                """SELECT * FROM messages 
+                   WHERE escalated = 1 AND resolved = FALSE
                    ORDER BY CASE priority WHEN 'urgent' THEN 0 ELSE 1 END,
                             timestamp DESC"""
             )
@@ -284,3 +286,13 @@ def get_all_messages(limit: int = 200) -> list[dict]:
             )
             rows = cur.fetchall()
     return [dict(r) for r in rows]
+
+def resolve_message(message_id: int) -> None:
+    """Mark an escalation as resolved so it disappears from the dashboard."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE messages SET resolved = TRUE WHERE id = %s",
+                (message_id,),
+            )
+        conn.commit()
