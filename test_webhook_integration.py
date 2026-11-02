@@ -113,6 +113,7 @@ def ctx(monkeypatch, env):
     fake_storage.get_discharge_text = lambda p: c.stored_text.get(p)
     fake_storage.claim_message = claim
     fake_storage.log_message = lambda **k: c.logged.append(k)
+    fake_storage.resolve_message = lambda message_id: None
     fake_storage.get_escalations = lambda: [
         {"patient_id": PHONE, "priority": "urgent", "risk_level": "high",
          "content": XSS, "reasoning": "<b>bold</b>"}
