@@ -1,0 +1,25 @@
+# Secrets and local-only files must never be baked into the image.
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+.git/
+.gitignore
+
+# Not needed at runtime.
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+test_*.py
+eval/
+data/
+docs/
+scripts/
+main.py
+interactive_test.py
+check_*.py
+Dockerfile
+.dockerignore
+*.log
