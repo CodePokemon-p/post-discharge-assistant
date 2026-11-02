@@ -524,3 +524,25 @@ def test_routes_that_do_slow_work_are_plain_functions(ctx):
     webhook = sys.modules["webhook"]
     for fn in (webhook.receive_message, webhook.intake_submit, webhook.process_message, webhook.dashboard):
         assert not asyncio.iscoroutinefunction(fn), fn.__name__
+
+# ---------------- Resolve button ----------------
+def test_resolve_needs_login(ctx):
+    r = ctx.client.post("/dashboard/resolve/5", follow_redirects=False)
+    assert r.status_code == 401
+
+
+def test_resolve_marks_the_case_and_returns_to_the_dashboard(ctx, monkeypatch):
+    resolved = []
+    monkeypatch.setattr(sys.modules["webhook"], "resolve_message", resolved.append)
+    r = ctx.client.post("/dashboard/resolve/5", auth=ADMIN, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/dashboard"
+    assert resolved == [5]
+
+
+def test_resolve_cannot_be_triggered_by_a_simple_link(ctx):
+    assert ctx.client.get("/dashboard/resolve/5", auth=ADMIN).status_code == 405
+
+
+def test_resolve_rejects_a_non_numeric_id(ctx):
+    r = ctx.client.post("/dashboard/resolve/abc", auth=ADMIN, follow_redirects=False)
+    assert r.status_code == 422
