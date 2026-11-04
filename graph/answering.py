@@ -1,5 +1,10 @@
 """
-Answer agent, v2 -- three layers now, not one:
+Answer agent, v3 -- layered, from most trustworthy to least:
+
+0. BROAD QUESTIONS ("what medicines do I take?", "what is in my summary?",
+   "when is my follow-up?"): one quote cannot back a list, so these are
+   answered straight from the care plan that was extracted from the document.
+   Nothing is invented, and no AI call is needed.
 
 1. DOCUMENT-GROUNDED: answer is checked against the discharge doc, AND
    the model must quote the exact source sentence, AND the code
@@ -16,11 +21,13 @@ Answer agent, v2 -- three layers now, not one:
    real use). This is what stops every off-document question from
    flooding the nurse queue, per the exact gap raised in review.
 
-3. SOFT REPLY: only if neither layer above can answer it. Note the
-   wording is deliberately "please check with your care team" -- the
-   design only alerts a nurse for high-risk symptoms (see triage.py),
-   so this layer must not promise the patient that someone has been
-   notified when nobody has.
+3. FRIENDLY FALLBACK: only if nothing above can answer it. It says honestly
+   that the answer is not in the discharge summary, and offers what the
+   assistant CAN do (see replies.py). It never promises that someone has been
+   notified, because the design only alerts a nurse for high-risk symptoms
+   (see triage.py).
+
+All patient-facing wording lives in replies.py so a nurse can review it.
 """
 
 from typing import Literal
@@ -29,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from config import require_api_key
 from graph.llm_provider import call_structured
+from graph.replies import build_fallback_reply, build_overview_reply, detect_overview_topic
 from graph.schemas import CarePlan
 from general_guidance import find_general_guidance
 
@@ -108,6 +116,16 @@ def answer_question_real(
     language: Literal["en", "ur"],
     history: list = None,
 ) -> dict:
+    # LAYER 0: broad questions are answered from the care plan, with no AI call.
+    topic = detect_overview_topic(patient_message)
+    if topic:
+        return {
+            "answer": build_overview_reply(topic, care_plan),
+            "grounded": True,
+            "source": "care_plan",
+            "priority": None,
+        }
+
     require_api_key()
 
     history_block = ""
@@ -129,7 +147,7 @@ def answer_question_real(
             f'Current question: "{patient_message}"'
         ),
     )
-   
+
     result = AnswerResult(**raw)
 
     # LAYER 1: verify the model's claimed evidence actually exists in
@@ -153,15 +171,10 @@ def answer_question_real(
             "priority": None,
         }
 
-    # LAYER 3: neither the document nor general guidance covers this.
-    # Wording is honest: "please check with your care team" rather than
-    # "I've flagged it" (which would imply a notification that does not
-    # happen in this path).
+    # LAYER 3: neither the document nor general guidance covers this. Say so
+    # honestly and offer what the assistant CAN do, instead of a dead end.
     return {
-        "answer": (
-            "Your discharge summary doesn't cover this specific question. "
-            "Please check this with your care team."
-        ),
+        "answer": build_fallback_reply(patient_message),
         "grounded": False,
         "source": "soft_reply",
         "priority": None,

@@ -21,6 +21,7 @@ import hashlib
 import logging
 import re
 
+from graph.replies import build_decline_reply, build_mild_symptom_reply, build_urgent_reply
 from safe_logging import mask_phone
 
 logger = logging.getLogger(__name__)
@@ -137,11 +138,7 @@ def decline_off_topic(state: dict) -> dict:
     logger.info("decline_off_topic: politely declining non-medical question")
     from storage import log_message
 
-    reply = (
-        "I can only help with questions about your recovery after "
-        "discharge. For anything else, please reach out to your "
-        "care team directly."
-    )
+    reply = build_decline_reply(state["patient_message"])
 
     log_message(
         patient_id=state["patient_id"],
@@ -176,12 +173,14 @@ def escalate(state: dict) -> dict:
     from storage import log_message
     from pushover_notify import send_pushover_notification
 
+    reply = build_urgent_reply()
+
     log_message(
         patient_id=state["patient_id"],
         content=state["patient_message"],
         intent=state.get("intent"),
         risk_level=state.get("risk_level"),
-        answer=state.get("answer"),
+        answer=reply,
         escalated=True,
         reasoning=state.get("triage_reasoning"),
     )
@@ -194,20 +193,22 @@ def escalate(state: dict) -> dict:
         message="High-risk symptom reported. Open the nurse dashboard for details.",
     )
 
-    return {"escalated": True}
+    return {"escalated": True, "answer": reply}
 
 
 def log_normal(state: dict) -> dict:
     logger.info("log_normal: low risk, logged, no nurse alert")
     from storage import log_message
 
+    reply = build_mild_symptom_reply(state["care_plan"], state["patient_message"])
+
     log_message(
         patient_id=state["patient_id"],
         content=state["patient_message"],
         intent=state.get("intent"),
         risk_level=state.get("risk_level"),
-        answer=state.get("answer"),
+        answer=reply,
         escalated=False,
         reasoning=state.get("triage_reasoning"),
     )
-    return {"escalated": False}
+    return {"escalated": False, "answer": reply}
