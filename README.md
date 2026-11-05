@@ -1,112 +1,128 @@
 # Post-Discharge Patient Follow-Up Assistant
 
-An agentic AI system that reads hospital discharge summaries, checks in on patients via WhatsApp, answers their recovery questions in plain language, and escalates to nursing staff **only when there is real symptom risk** -- in both English and Urdu.
+A WhatsApp assistant that helps care teams stay in touch with patients after they leave hospital. It answers recovery questions from the patient's own discharge summary, and it alerts a nurse when a message looks urgent.
+
+> Demo only. It uses made-up data, it is not medical advice, and it has not been clinically validated.
+
+**Demo video:** [coming soon ] &nbsp;|&nbsp; **Screenshots:** see the `docs/` folder
 
 ## The problem
 
-A large share of hospital readmissions happen not because treatment failed, but because patients miss medications, don't recognize warning signs, or fall through the cracks after leaving the hospital. This system stays with the patient after discharge so they don't have to rely on a printed instruction sheet alone.
+Hospitals lose track of patients once they go home. Patients are left with a page of medical terms and a lot of questions: "Can I eat this?", "Is this pain normal?", "Do I keep taking my medicine?". Nurses cannot answer every call, and they cannot easily tell which messages are urgent.
+
+## What it does
+
+- **Reads a discharge summary** (text or a photo) and turns it into a structured care plan: diagnosis, medicines, follow-up date, warning signs.
+- **Answers patient questions on WhatsApp in plain language**, using only the patient's own document. Broad questions ("which medicines do I take?") are answered straight from the care plan. Specific questions must be backed by an exact quote from the document, and the code checks that the quote really exists.
+- **Triages symptoms.** Fast keyword rules run first. If they find nothing, an AI check decides, and when it is unsure it chooses *high risk*. Urgent cases alert the nurse and appear on a dashboard.
+- **Gives nurses a dashboard** with urgent and low-priority cases, one-click call, and resolve.
+- **Fails safely.** If processing breaks, the message still reaches a nurse and the patient still gets a safe reply.
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A[Discharge summary<br/>text or image] --> B[Extraction agent<br/>+ vision transcription]
-    B --> C[Care plan stored<br/>SQLite]
-    C --> D[Patient message<br/>WhatsApp / terminal]
-    D --> E[Intent classifier]
-    E -->|off_topic| F[Polite decline<br/>no nurse]
-    E -->|question| G[Answer agent]
-    E -->|symptom_report| H[Triage agent<br/>rules + LLM]
-    G -->|document grounded| I[Reply to patient<br/>with verified citation]
-    G -->|general guidance| I
-    G -->|neither| J[Soft reply + logged<br/>no real-time alert]
-    H -->|low risk| K[Logged<br/>no alert]
-    H -->|high risk| L[URGENT alert<br/>nurse dashboard]
+    A["Discharge summary (text or photo)"] --> B["Read and extract care plan"]
+    B --> DB[("PostgreSQL")]
+    P["Patient WhatsApp message"] --> W["Webhook: verify signature, skip duplicates, answer Meta at once"]
+    W --> G["Background workflow (LangGraph)"]
+    DB --> G
+    G --> I{"What is it?"}
+    I -->|"question"| Q["Answer from care plan, or from a verified document quote"]
+    I -->|"symptom"| T["Triage: rules first, then AI. Unsure means high risk"]
+    I -->|"something else"| D["Warm, polite decline"]
+    T -->|"high risk"| E["Alert nurse, urgent dashboard card, safety advice"]
+    T -->|"low risk"| L["Warm reply with warning signs"]
+    Q --> R["Reply to patient on WhatsApp"]
+    E --> R
+    L --> R
+    D --> R
+    E --> N["Nurse dashboard: call, resolve"]
 ```
 
-**The core design principle:** only high-risk symptoms trigger a real-time nurse alert. Questions are answered by the agent (from the document or from curated general guidance), and off-topic messages get a polite decline. The nurse queue is reserved for genuine risk -- not for routine questions and not for non-medical chatter.
+## Design decisions
 
-## Client requirements -> how each is met
+- **A workflow, not a swarm of free agents.** In healthcare I want predictable, auditable paths. The AI is used where it helps (reading documents, understanding messages), and fixed rules and checks sit around it.
+- **Verify the AI, do not trust it.** Answers need an exact quote from the document, checked in code. A made-up quote is rejected.
+- **Rules first, AI second, bias toward caution.** A missed urgent message is far worse than an extra alert.
+- **Only symptoms page a nurse.** Early versions alerted on every unanswered question, which floods a nurse queue (alert fatigue). Now questions are answered or politely declined, and only high-risk symptoms alert.
+- **Answer Meta first, work second.** The webhook replies instantly and does the slow work in the background. Every WhatsApp message ID is claimed in the database first, so Meta's retries never cause double replies or double alerts.
+- **All patient-facing wording lives in one file** (`graph/replies.py`) so a nurse can review it without reading code. It aims for plain language and short sentences, and it never tells a patient to stop a medicine.
 
-| Requirement | Implementation |
-|---|---|
-| Handle medical documents | LLM tool-calling extracts diagnosis, medications, follow-up date, and red-flag symptoms into a validated Pydantic schema. Images supported via a two-step vision-transcription → extraction pipeline. |
-| Patient-friendly language | Answer agent explicitly instructed to avoid medical jargon. Every grounded answer must quote the exact source sentence from the document; the code independently verifies the quote exists before returning it. |
-| Escalate when unsure | Three-tier escalation: (1) document-grounded answers with verified citations, (2) curated general guidance for common questions, (3) soft reply + low-priority log when neither covers it. Only symptom triage escalates to a nurse in real time. |
-| English and Urdu | Intent classification, triage, and answering are LLM-driven (not keyword-based), so they work correctly in either language. |
+## Safety and privacy
 
-## Architecture
+- Messages, care plans, diagnoses and full phone numbers are never written to logs. Phone numbers are masked, and WhatsApp message IDs (which hide the number) are hashed.
+- The Meta webhook verifies the `X-Hub-Signature-256` signature, so fake messages are rejected.
+- The dashboard and intake page need an admin login, and everything shown on the dashboard is HTML-escaped.
+- Push alerts carry no symptom text.
+- Use made-up data only.
 
-- **`graph/`** -- the LangGraph state machine. All LLM-backed agents (extraction, intent classification, hybrid triage, grounded Q&A) share one provider-agnostic interface (`llm_provider.py`) rather than a hardcoded vendor SDK.
-- **`graph/intent.py`** -- three-way classifier: `question` | `symptom_report` | `off_topic`.
-- **`graph/triage.py`** -- hybrid triage: deterministic keyword check first, LLM judgment fallback for ambiguous cases.
-- **`graph/answering.py`** -- three-layer answer pipeline with code-verified citations (see "Hallucination prevention" below).
-- **`general_guidance.py`** -- curated knowledge base of common recovery questions. Content is placeholder and **must be replaced with clinician-approved text before real use**.
-- **`storage.py`** -- SQLite persistence: care plans, phone numbers, and a full audit log of every check-in with escalation reasoning.
-- **`webhook.py`** -- FastAPI server: receives inbound WhatsApp messages (Meta Cloud API), runs them through the graph, replies, and serves a live nurse dashboard at `/dashboard`.
-- **`scheduler.py`** -- APScheduler job for daily check-ins, with a dry-run fallback when messaging credentials aren't configured.
-- **`messaging.py`** -- WhatsApp send logic via Meta's Cloud API.
-- **`interactive_test.py`** -- terminal walkthrough of the full pipeline against a real discharge image.
+## Tests
+
+Run `python -m pytest`. The tests cover the security checks, duplicate handling, the fail-safe path, log cleanliness, intake validation, the Resolve button, and the wording and readability of every patient reply. Each important protection was also checked by deliberately breaking it and confirming a test failed.
+
+A test run once exposed a real bug: the symptom-triage function had been overwritten by an unrelated edit, so urgent messages silently got no alert. It was found by testing, restored, and is now covered.
+
+The `eval/` folder holds 43 labeled patient messages in English, Urdu and Roman Urdu, for measuring triage behaviour. The labels are a first draft and still need clinician review.
 
 ## Tech stack
 
-Python, LangGraph, LangChain, Pydantic, FastAPI, SQLite, APScheduler, Meta WhatsApp Cloud API. LLM provider is swappable between Anthropic Claude and Groq (free tier) via a single environment variable -- every prompt file is written against one shared interface, not a specific vendor's SDK.
+Python, FastAPI, LangGraph, PostgreSQL (Neon), WhatsApp Cloud API, Groq-hosted open models (provider is configurable), Pushover alerts, Docker, Render (free tier), pytest.
 
-## Hallucination prevention -- the concrete mechanism
+## Run it locally
 
-The answer agent is not trusted to self-report confidence. Instead:
+1. `python -m venv venv`, activate it, then `pip install -r requirements.txt`
+2. Copy `.env.example` to `.env` and fill it in (see below).
+3. `uvicorn webhook:app --reload --port 8000`
+4. Expose it with a tunnel and set the callback URL in Meta to `https://<your-address>/meta/webhook`.
+5. Open `/intake` (admin login), register a made-up patient, then message the WhatsApp number.
 
-1. The LLM must return an `answer` **and** a `source_quote` copied verbatim from the discharge document.
-2. Code (`_verify_quote` in `answering.py`) independently checks that the quote actually appears in the document, normalized for whitespace and case.
-3. If the quote cannot be verified, the answer is discarded and the agent falls through to the general-guidance layer or a soft reply.
+Docker: `docker build -t post-discharge-assistant .`
 
-This means an invented quote -- even if the model sets `grounded=True` -- is caught and does not reach the patient. **The model does not decide whether it is hallucinating; the code does.**
+| Setting | Purpose |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection |
+| `ADMIN_USER`, `ADMIN_PASSWORD` | Dashboard and intake login |
+| `META_APP_SECRET`, `META_VERIFY_TOKEN` | Webhook signature and handshake |
+| `META_WHATSAPP_TOKEN`, `META_PHONE_NUMBER_ID` | Sending WhatsApp replies |
+| `LOG_HASH_SECRET` | Keyed hash for log references |
+| `LLM_PROVIDER` and its API key | Which AI provider to use |
+| `PUSHOVER_APP_TOKEN`, `PUSHOVER_USER_KEY` | Optional nurse push alerts |
 
-## Design decisions worth knowing about
+## Hosting on free tiers: what to expect
 
-- **Hybrid triage, not pure LLM judgment.** A deterministic keyword check runs first for speed and reliability; the LLM only handles ambiguous or non-English cases. Urdu messages currently rely entirely on the LLM path, since the rule-based fast path only matches English keywords -- documented here rather than hidden, since it's a real property of the current design.
-- **Context-stuffing instead of a vector database for Q&A.** A single discharge document is short enough to fit entirely in the model's context window, so grounding here means "give the model the whole document," not "embed and search chunks." A vector store would earn its complexity once this searches a patient's full multi-visit history.
-- **Provider-agnostic LLM calls.** `llm_provider.py` abstracts Anthropic and Groq behind one `call_structured` interface. Switching providers is a single env-var change; no calling code knows which vendor answered.
-- **Retry on malformed tool calls.** Groq's strict validator occasionally rejects a response when the model returns medications in an unexpected shape. A fallback schema with looser typing catches this and retries once -- documented as a real production concern, not a hidden patch.
-- **Real bugs found and fixed during testing:**
-  - **Case-sensitivity in triage rules**: the rule-based check originally compared a lowercased patient message against non-lowercased extracted red flags, causing a genuinely concerning message ("I have a fever") to be silently misclassified as low-risk. Caught in live testing, root-caused, fixed, confirmed with a targeted re-test.
-  - **Nurse alert flooding**: initially every ungrounded answer escalated to the nurse dashboard. Testing against real documents showed this would drown the queue in non-urgent items. Fixed with the three-tier escalation model -- off-topic questions declined, low-confidence questions logged for batch review, only symptom risk alerts in real time.
-  - **Non-deterministic extraction**: running the same image multiple times produced different medication counts. Documented with before/after runs. A production fix would add a deterministic cross-check (count medication-like patterns in raw text and compare against the model's output), not rely on prompt wording alone.
+It runs on free services (Render and Neon), which have real limits:
 
-## Known limitations / what's next
+- The free web service sleeps after about 15 minutes without traffic, and the first request afterwards can take around 50 seconds. A free uptime ping on `/health` keeps it awake.
+- Meta's test WhatsApp number can only message a handful of phone numbers that are added by hand. A public launch needs a verified business number.
+- Meta's temporary token expires every 24 hours, so a system-user token is used for the live service.
+- Messages that the business starts, outside WhatsApp's 24-hour reply window, need approved templates and can cost money.
 
-- **General guidance coverage is deliberately small.** The current
-  `general_guidance.py` has ~10 entries — a starter set. In production,
-  the coverage would grow two ways: (a) RAG over a clinician-approved
-  corpus, or (b) periodic review of fall-through logs to find and answer
-  the recurring questions patients actually ask. The logs already capture
-  every fall-through, so the data to drive this is being collected today.
-- **Fallback replies currently dead-end.** A patient asking a question
-  nobody covers gets "please check with your care team" with no
-  escalation path. The next iteration would offer an explicit opt-in
-  ("reply NURSE to flag this") so the patient can decide whether it's
-  worth a human's time.
-- **Non-deterministic LLM extraction.** The model occasionally drops a medication across runs. A prompt instruction reduces this; it does not eliminate it. Production needs a code-level cross-check.
-- **WhatsApp template requirement.** Meta requires an approved message template for the first business-initiated message to a user. Proactive daily check-ins would need an approved template for full production use; today's testing relies on the patient messaging first, which reopens a free-form reply window.
-- **Outbound reach beyond the test number** requires Meta Business Verification -- a multi-day external review process, not a codebase problem.
-- **Nurse dashboard is read-only.** A production version would add authentication and a "mark resolved" action.
-- **Patient matching** is currently by a single demo `patient_id`. Production would look up the patient by their WhatsApp number.
+## Known limitations
 
-## Running it locally
+- Replies are in English only. Urdu and Roman Urdu messages are understood only partly.
+- The general-guidance file is a placeholder and needs nurse-written content.
+- Reply wording is a careful draft that a clinician should review.
+- No per-nurse accounts or audit trail. The Resolve button leaves no record and has no protection against forged clicks.
+- Extraction can vary between runs, and the assistant has not been clinically evaluated.
+- Voice notes and photos are not read. The patient is asked to type.
+- It is a single-hospital pilot design.
 
-```bash
-python -m venv venv
-venv\Scripts\activate          # Windows
-pip install -r requirements.txt
-```
+## What real users taught me
 
-Copy `.env.example` to `.env` and fill in your own API keys (Groq or Anthropic, plus Meta WhatsApp credentials if testing the live integration).
+I talked to a real post-surgery patient, and her questions exposed gaps: mixed messages (a question plus a symptom), questions about stopping medicines, test results and worry, and the feeling of "talking to a wall". I also read an AI-assisted summary of public nursing material, which is a source of hypotheses, not verified interviews. Both shaped the roadmap below.
 
-```bash
-python main.py                                  # run the graph against sample scenarios
-python interactive_test.py data\01_st.jpg       # interactive pipeline walkthrough
-uvicorn webhook:app --reload --port 8000        # live WhatsApp webhook + dashboard
-python scheduler.py                             # manually trigger daily check-ins
-```
+## Roadmap
 
-Nurse dashboard: `http://localhost:8000/dashboard`
+1. A planner that splits mixed messages, remembers the conversation, and uses tools with the safety rules as guardrails.
+2. Approve-or-reject flow: the assistant drafts, a nurse approves or edits.
+3. A nurse-written response library for common worries and questions.
+4. Urdu and Roman Urdu replies, then voice notes.
+5. A scoring script for the labeled cases, with recall on urgent messages first.
+6. A Telegram channel, per-nurse accounts, and an audit trail.
+
+## Repository map
+
+`webhook.py` (API, dashboard, intake), `security.py`, `safe_logging.py`, `storage.py`, `messaging.py`, `pushover_notify.py`, `scheduler.py` (daily check-ins, not started yet), `general_guidance.py`, `graph/` (workflow: `build`, `nodes`, `extraction`, `intent`, `triage`, `answering`, `replies`, `llm_provider`, `schemas`, `state`), `eval/` (labeled cases), `test_*.py`, `Dockerfile`.
+
+Built with AI coding assistants. The design decisions, safety rules, testing and review are mine.
