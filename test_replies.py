@@ -30,6 +30,8 @@ CARE_PLAN = SimpleNamespace(
 )
 NO_DETAILS = SimpleNamespace(diagnosis="", medications=[], follow_up_date="", red_flags=[])
 
+ASKED_BEFORE = [{"content": "I feel tired", "answer": R.build_mild_symptom_reply(CARE_PLAN, "I feel tired")}]
+
 FORBIDDEN = ["don't worry", "do not worry", "nothing to worry", "stop taking", "you can stop",
              "no need to take", "you are fine", "you're fine", "i promise", "guarantee", "diagnos"]
 
@@ -48,6 +50,8 @@ def all_replies():
         "fallback_b": R.build_fallback_reply("b"),
         "mild": R.build_mild_symptom_reply(CARE_PLAN, "I feel tired"),
         "mild_none": R.build_mild_symptom_reply(NO_DETAILS, "I feel tired"),
+        "mild_ack": R.build_mild_symptom_reply(CARE_PLAN, "pain is 4 out of 10", ASKED_BEFORE),
+        "clarify_number": R.build_clarify_number_reply(),
         "emotional": R.build_emotional_reply(),
         "urgent": R.build_urgent_reply(),
         "decline": R.build_decline_reply("what is the weather"),
@@ -136,7 +140,8 @@ def test_mild_symptom_reply_is_warm_useful_and_honest():
     text = R.build_mild_symptom_reply(CARE_PLAN, "I feel tired and have a little pain")
     assert "sorry" in text.lower() and "Thank you for telling me" in text
     assert all(f"- {flag}" in text for flag in CARE_PLAN.red_flags)
-    assert "tell me more" in text
+    assert "If anything changes" in text
+    assert "from 1 to 10" not in text and "temperature" not in text   # no question we cannot use
     assert "Got it, thanks for the update" not in text
     assert "flagged" not in text                  # we must not claim a nurse was told for mild cases
 
@@ -188,7 +193,7 @@ def _reading_ease(text):
             len(words) / len(sentences))
 
 
-@pytest.mark.parametrize("name", ["fallback_a", "fallback_b", "mild", "mild_none", "emotional",
+@pytest.mark.parametrize("name", ["fallback_a", "fallback_b", "mild", "mild_none", "mild_ack", "clarify_number", "emotional",
                                   "urgent", "decline", "followup_none", "warning"])
 def test_fixed_replies_are_plain_language(name):
     """Health-literacy guidance: short sentences, easy words (Flesch reading ease 65+)."""
@@ -299,3 +304,72 @@ def test_off_topic_and_worry_nodes(modules):
     worried = modules.nodes.decline_off_topic({**base, "patient_message": "why am i overthinking my surgery"})
     assert "recovery" in plain["answer"] and "not alone" in worried["answer"]
     assert plain["escalated"] is False and worried["escalated"] is False
+
+
+# ---------------- blank doses, repeated replies, bare numbers ----------------
+BLANK_DOSE_PLAN = SimpleNamespace(
+    diagnosis="x", follow_up_date="", red_flags=["fever"],
+    medications=[SimpleNamespace(name="ceftriaxone", schedule=", "),
+                 SimpleNamespace(name="Zithromycin", schedule=", daily until gone"),
+                 SimpleNamespace(name="steroids", schedule=""),
+                 SimpleNamespace(name="Azithromycin", schedule="500mg, once daily")],
+)
+
+
+def test_medicines_without_doses_show_just_the_name():
+    text = R.build_medicines_reply(BLANK_DOSE_PLAN)
+    assert "- ceftriaxone\n" in text and "- steroids\n" in text
+    assert "- Zithromycin: daily until gone" in text
+    assert "- Azithromycin: 500mg, once daily" in text           # inner commas are kept
+    assert ": ," not in text and ": \n" not in text
+
+
+def test_summary_also_hides_empty_doses():
+    text = R.build_summary_reply(BLANK_DOSE_PLAN)
+    assert "- ceftriaxone" in text and ": ," not in text
+
+
+def test_a_second_reply_is_a_short_thank_you_not_a_repeat():
+    first = R.build_mild_symptom_reply(CARE_PLAN, "I feel tired")
+    second = R.build_mild_symptom_reply(CARE_PLAN, "my pain is 4 out of 10",
+                                        [{"content": "I feel tired", "answer": first}])
+    assert "Thank you, that helps" in second
+    assert "- fever" not in second and len(second) < len(first) * 0.7
+    third = R.build_mild_symptom_reply(CARE_PLAN, "still the same",
+                                       [{"content": "x", "answer": first}, {"content": "y", "answer": second}])
+    assert "Thank you, that helps" in third                      # stays short, does not flip back
+
+
+def test_the_full_reply_returns_after_an_unrelated_exchange():
+    history = [{"content": "tired", "answer": R.build_mild_symptom_reply(CARE_PLAN, "tired")},
+               {"content": "my medicines?", "answer": R.build_medicines_reply(CARE_PLAN)}]
+    assert "- fever" in R.build_mild_symptom_reply(CARE_PLAN, "I feel dizzy", history)
+
+
+@pytest.mark.parametrize("message", ["4", " 4 ", "4/10", "7 / 10", "4 out of 10", "10.", "٤", "۴"])
+def test_bare_numbers_are_recognised(message):
+    assert R.is_bare_number(message)
+
+
+@pytest.mark.parametrize("message", ["4 hours ago", "I take 2 tablets", "pain 4", "my pain is 4 out of 10",
+                                     "", "1234567", "fever"])
+def test_numbers_with_meaning_are_not_bare(message):
+    assert not R.is_bare_number(message)
+
+
+def test_a_bare_number_gets_a_gentle_question_everywhere(modules):
+    for call in (lambda: R.build_decline_reply("4"), lambda: R.build_mild_symptom_reply(CARE_PLAN, "4"),
+                 lambda: ask(modules, "4")["answer"]):
+        text = call()
+        assert "not sure what that number is about" in text and "my pain is 4 out of 10" in text
+    assert modules.llm == 0                                       # no AI call, no "couldn't find it in your summary"
+    assert ask(modules, "4")["source"] == "clarify"
+
+
+def test_the_node_uses_the_conversation_to_avoid_repeating(modules):
+    first = R.build_mild_symptom_reply(CARE_PLAN, "I feel tired")
+    state = {"patient_id": "p1", "patient_message": "my pain is 4 out of 10", "care_plan": CARE_PLAN,
+             "intent": "symptom_report", "risk_level": "low", "triage_reasoning": "mild",
+             "conversation_history": [{"content": "I feel tired", "answer": first}]}
+    result = modules.nodes.log_normal(state)
+    assert "Thank you, that helps" in result["answer"] and modules.logged[0]["answer"] == result["answer"]

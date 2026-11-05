@@ -91,6 +91,26 @@ _EMOTION_PATTERNS = [
 ]
 
 
+_BARE_NUMBER = re.compile(r"^\s*[0-9۰-۹٠-٩]{1,3}(\.[0-9]+)?\s*(/\s*10|out of 10)?\s*[.!]?\s*$", re.I)
+
+
+def is_bare_number(message: str) -> bool:
+    """A message that is only a number, like "4" or "4/10". It has no subject."""
+    return bool(_BARE_NUMBER.match(message or ""))
+
+
+_FULL_REPLY_MARKER = "keep your care team in the loop"
+
+
+def _just_gave_symptom_advice(history) -> bool:
+    """True if our previous reply was the full symptom advice, so we do not repeat it."""
+    for item in reversed(history or []):
+        answer = (item or {}).get("answer")
+        if answer:
+            return _FULL_REPLY_MARKER in answer.lower()
+    return False
+
+
 def is_emotional(message: str) -> bool:
     text = (message or "").lower()
     return any(re.search(p, text) for p in _EMOTION_PATTERNS)
@@ -101,8 +121,14 @@ def is_emotional(message: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _medicine_lines(care_plan) -> str:
-    meds = list(getattr(care_plan, "medications", None) or [])
-    return "\n".join(f"- {m.name}: {m.schedule}" for m in meds)
+    """One line per medicine. Shows only what the document gave: no empty ': , '."""
+    lines = []
+    for m in (getattr(care_plan, "medications", None) or []):
+        name = (m.name or "").strip(" ,;")
+        schedule = (m.schedule or "").strip(" ,;")
+        if name:
+            lines.append(f"- {name}: {schedule}" if schedule else f"- {name}")
+    return "\n".join(lines)
 
 
 def _flag_lines(care_plan) -> str:
@@ -217,10 +243,27 @@ def build_emotional_reply() -> str:
     )
 
 
-def build_mild_symptom_reply(care_plan, message: str = "") -> str:
+def build_clarify_number_reply() -> str:
+    return (
+        "Thank you. I'm not sure what that number is about.\n\n"
+        "If you are telling me how you feel, please write it in a sentence. "
+        'For example: "my pain is 4 out of 10" or "my temperature is 99".'
+    )
+
+
+def build_mild_symptom_reply(care_plan, message: str = "", history=None) -> str:
     """A symptom that did not trigger an alert, or worry. Warm, honest, and clear."""
+    if is_bare_number(message):
+        return build_clarify_number_reply()
     if is_emotional(message):
         return build_emotional_reply()
+    if _just_gave_symptom_advice(history):
+        return (
+            "Thank you, that helps.\n\n"
+            "Please keep your care team in the loop. If it gets worse, or you "
+            "notice any of the warning signs I listed, contact them or get urgent care.\n\n"
+            "I'm here if you want to tell me more."
+        )
     empathy = _pick(
         ["I'm sorry you're not feeling your best.", "I'm sorry you're feeling this way."],
         message,
@@ -235,8 +278,8 @@ def build_mild_symptom_reply(care_plan, message: str = "") -> str:
         f"{empathy} Thank you for telling me.\n\n"
         "I can't judge this from a message, so please keep your care team in the loop.\n\n"
         f"{watch}"
-        "If you like, tell me more. For example, tell me your temperature, or how "
-        "strong the pain is from 1 to 10. I will check it against your warning signs."
+        "If anything changes, message me again. For example, tell me if the pain "
+        "gets stronger or if you get a fever."
     )
 
 
@@ -255,6 +298,8 @@ def build_urgent_reply() -> str:
 
 def build_decline_reply(message: str = "") -> str:
     """Off-topic messages. Worry gets a human reply, not a refusal."""
+    if is_bare_number(message):
+        return build_clarify_number_reply()
     if is_emotional(message):
         return build_emotional_reply()
     return (

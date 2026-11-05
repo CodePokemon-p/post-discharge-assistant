@@ -470,6 +470,17 @@ def health():
     """Public liveness check for uptime monitors. Returns no data."""
     return {"status": "ok"}
 
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Post-Discharge Assistant</title></head>
+    <body style="font-family: sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem;">
+    <h1>Post-Discharge Assistant</h1>
+    <p>A WhatsApp assistant that helps care teams follow up with patients after they leave hospital.
+    It answers recovery questions from the patient's own discharge summary and alerts a nurse
+    when a message looks urgent.</p>
+    <p>This is a demo with made-up data. It is not medical advice. The nurse dashboard is password protected.</p>
+    <p><a href="https://github.com/CodePokemon-p/post-discharge-assistant">Source code and demo video</a></p>
+    </body></html>"""
 
 @app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 def dashboard():

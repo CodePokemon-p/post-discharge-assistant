@@ -36,7 +36,13 @@ from pydantic import BaseModel, Field
 
 from config import require_api_key
 from graph.llm_provider import call_structured
-from graph.replies import build_fallback_reply, build_overview_reply, detect_overview_topic
+from graph.replies import (
+    build_clarify_number_reply,
+    build_fallback_reply,
+    build_overview_reply,
+    detect_overview_topic,
+    is_bare_number,
+)
 from graph.schemas import CarePlan
 from general_guidance import find_general_guidance
 
@@ -116,6 +122,15 @@ def answer_question_real(
     language: Literal["en", "ur"],
     history: list = None,
 ) -> dict:
+    # A message that is only a number (like "4") has no subject: ask gently.
+    if is_bare_number(patient_message):
+        return {
+            "answer": build_clarify_number_reply(),
+            "grounded": False,
+            "source": "clarify",
+            "priority": None,
+        }
+
     # LAYER 0: broad questions are answered from the care plan, with no AI call.
     topic = detect_overview_topic(patient_message)
     if topic:

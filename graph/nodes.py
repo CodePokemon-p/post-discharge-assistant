@@ -200,7 +200,11 @@ def log_normal(state: dict) -> dict:
     logger.info("log_normal: low risk, logged, no nurse alert")
     from storage import log_message
 
-    reply = build_mild_symptom_reply(state["care_plan"], state["patient_message"])
+    reply = build_mild_symptom_reply(
+        state["care_plan"],
+        state["patient_message"],
+        state.get("conversation_history", []),
+    )
 
     log_message(
         patient_id=state["patient_id"],
