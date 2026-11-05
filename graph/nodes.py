@@ -182,6 +182,7 @@ def escalate(state: dict) -> dict:
         risk_level=state.get("risk_level"),
         answer=reply,
         escalated=True,
+        priority="urgent",
         reasoning=state.get("triage_reasoning"),
     )
 

@@ -294,6 +294,7 @@ def test_urgent_case_gets_safety_advice_and_a_minimal_alert(modules):
     result = modules.nodes.escalate(state)
     assert result["escalated"] is True and "emergency" in result["answer"]
     assert modules.logged[0]["answer"] == result["answer"] and modules.logged[0]["escalated"] is True
+    assert modules.logged[0]["priority"] == "urgent"                  # so the dashboard files it as urgent
     title, message = modules.alerts[0]
     assert "fever" not in (title + message).lower() and "923001234567" not in title
 

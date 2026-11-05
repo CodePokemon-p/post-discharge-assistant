@@ -77,7 +77,7 @@ from messaging import send_whatsapp_message
 from pushover_notify import send_pushover_notification
 from safe_logging import mask_phone, patient_ref, setup_logging, short_id
 from security import require_admin, require_meta_signature
-
+from dashboard_ui import render_dashboard, render_home
 setup_logging()
 logger = logging.getLogger("webhook")
 
@@ -472,116 +472,16 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Post-Discharge Assistant</title></head>
-    <body style="font-family: sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem;">
-    <h1>Post-Discharge Assistant</h1>
-    <p>A WhatsApp assistant that helps care teams follow up with patients after they leave hospital.
-    It answers recovery questions from the patient's own discharge summary and alerts a nurse
-    when a message looks urgent.</p>
-    <p>This is a demo with made-up data. It is not medical advice. The nurse dashboard is password protected.</p>
-    <p><a href="https://github.com/CodePokemon-p/post-discharge-assistant">Source code and demo video</a></p>
-    </body></html>"""
+       return render_home(os.getenv("https://github.com/CodePokemon-p/post-discharge-assistant"))
+
 
 @app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
-def dashboard():
-    escalations = get_escalations()
-    all_messages = get_all_messages()
-
-    urgent = [r for r in escalations if str(r.get("priority", "")).lower() == "urgent"]
-    low = [r for r in escalations if str(r.get("priority", "")).lower() != "urgent"]
-
-    def render_cases(rows, bg_color, border_color, text_color):
-        if not rows:
-            return "<p class='text-gray-500 italic'>No active cases.</p>"
-        html_out = []
-        for r in rows:
-            # Clean up phone number for the tel: link
-            phone = _esc(r.get('patient_id', '')).replace("whatsapp:", "").replace("+", "")
-            
-            html_out.append(f"""
-            <div class="bg-white rounded-lg shadow-md p-4 mb-4 border-l-4 {border_color}">
-                <div class="flex justify-between items-start">
-                    <div class="pr-4">
-                        <span class="inline-block {bg_color} {text_color} text-xs px-2 py-1 rounded-full font-semibold mb-2">
-                            {_esc(r.get('risk_level', 'unknown')).upper()} RISK
-                        </span>
-                        <p class="text-gray-700 font-medium break-all"><strong>Patient:</strong> {_esc(r.get('patient_id'))}</p>
-                        <p class="text-gray-600 mt-1"><strong>Message:</strong> "{_esc(r.get('content'))}"</p>
-                        <p class="text-gray-500 text-sm mt-2"><strong>Reason:</strong> {_esc(r.get('reasoning'))}</p>
-                    </div>
-                    <div class="flex flex-col space-y-2 flex-shrink-0">
-                        <a href="tel:{phone}" class="bg-blue-600 hover:bg-blue-700 text-white text-center px-4 py-2 rounded font-medium text-sm transition">
-                            📞 Call
-                        </a>
-                        <form action="/dashboard/resolve/{r.get('id')}" method="post">
-                            <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium text-sm transition">
-                                ✓ Resolve
-                            </button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            """)
-        return "\n".join(html_out)
-
-    def render_all_rows(rows):
-        if not rows:
-            return "<p><em>None.</em></p>"
-        out = []
-        for r in rows:
-            out.append(f"""
-            <div class="bg-white rounded-lg shadow-sm p-3 mb-2 border-l-4 border-gray-400">
-                <div class="text-sm text-gray-600">
-                    <strong>Patient:</strong> {_esc(r.get('patient_id', '?'))}
-                    &nbsp;|&nbsp; <strong>Intent:</strong> {_esc(r.get('intent', '?'))}
-                    &nbsp;|&nbsp; <strong>Escalated:</strong> {_esc(r.get('escalated', '?'))}
-                </div>
-                <div class="mt-1 text-gray-800"><strong>Message:</strong> {_esc(r.get('content', ''))}</div>
-                <div class="mt-1 text-gray-500 text-sm"><strong>Answer:</strong> {_esc(r.get('answer') or '(none)')}</div>
-            </div>
-            """)
-        return "\n".join(out)
-
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Nurse Dashboard</title>
-        <meta http-equiv="refresh" content="30">
-        <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-gray-100 min-h-screen pb-12">
-        <nav class="bg-white shadow-sm border-b mb-8">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-                <h1 class="text-2xl font-bold text-gray-800">Nurse Triage Dashboard</h1>
-                <a href="/intake" class="bg-blue-50 text-blue-600 hover:bg-blue-100 px-4 py-2 rounded font-medium text-sm transition">+ Register New Patient</a>
-            </div>
-        </nav>
-        
-        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 md:grid-cols-2 gap-8">
-            <div>
-                <h2 class="text-xl font-semibold text-red-600 mb-4 flex items-center">
-                    <span class="w-3 h-3 bg-red-600 rounded-full mr-2"></span> Urgent Cases ({len(urgent)})
-                </h2>
-                {render_cases(urgent, "bg-red-100", "border-red-500", "text-red-800")}
-            </div>
-
-            <div>
-                <h2 class="text-xl font-semibold text-orange-500 mb-4 flex items-center">
-                    <span class="w-3 h-3 bg-orange-500 rounded-full mr-2"></span> Low Priority ({len(low)})
-                </h2>
-                {render_cases(low, "bg-orange-100", "border-orange-400", "text-orange-800")}
-            </div>
-        </main>
-
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-12">
-            <h2 class="text-xl font-semibold text-gray-700 mb-4 border-b pb-2">All Recent Messages</h2>
-            {render_all_rows(all_messages)}
-        </div>
-    </body>
-    </html>
-    """
-
+def dashboard(request: Request):
+       q = request.query_params
+       return render_dashboard(
+           get_escalations(), get_all_messages(),
+           mask=q.get("mask") == "1", auto_refresh=q.get("refresh") != "0",
+       )
 
 @app.post("/dashboard/resolve/{message_id}", dependencies=[Depends(require_admin)])
 def resolve_case(message_id: int):
