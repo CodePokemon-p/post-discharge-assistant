@@ -210,10 +210,23 @@ def render_dashboard(escalations: list, all_messages: list, mask: bool = False, 
 # public home page
 # ---------------------------------------------------------------------------
 
+def _clean_link(url: Optional[str]) -> Optional[str]:
+    """Accepts what people really type into a settings box: spaces, quotes, no https://.
+    Anything that is not a normal web address (such as javascript:) is dropped."""
+    text = (url or "").strip().strip("\"'").strip()
+    if not text:
+        return None
+    if text.lower().startswith(("https://", "http://")):
+        return text
+    if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/|$)", text):      # e.g. github.com/name/repo
+        return "https://" + text
+    return None
+
+
 def render_home(github_url: Optional[str] = None) -> str:
     links = ['<a class="btn primary" href="/dashboard">Nurse dashboard (login)</a>']
-    url = (github_url or "").strip()
-    if url.startswith(("https://", "http://")):
+    url = _clean_link(github_url)
+    if url:
         links.insert(0, f'<a class="btn primary" href="{_esc(url)}">Source code and demo video</a>')
     links.append('<a class="btn" href="/health">Service status</a>')
     body = (

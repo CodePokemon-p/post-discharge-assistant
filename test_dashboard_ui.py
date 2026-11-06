@@ -127,7 +127,16 @@ def test_home_page_content_and_links():
     assert '<meta name="color-scheme" content="dark">' in page
 
 
-@pytest.mark.parametrize("url", [None, "", "javascript:alert(1)", "github.com/no-scheme"])
+@pytest.mark.parametrize("typed", ['"https://github.com/a/b"', "  https://github.com/a/b  ", "'https://github.com/a/b'",
+                                   "github.com/a/b", "HTTPS://github.com/a/b"])
+def test_home_page_forgives_common_typing_mistakes_in_the_source_link(typed):
+    """The link vanished live because of how it was typed into Render's settings box."""
+    page = ui.render_home(typed)
+    assert "Source code and demo video" in page
+    assert 'href="https://github.com/a/b"' in page or 'href="HTTPS://github.com/a/b"' in page
+
+
+@pytest.mark.parametrize("url", [None, "", "   ", "javascript:alert(1)", "not a link", "ftp://example.com/x", "data:text/html,hi"])
 def test_home_page_ignores_a_missing_or_unsafe_source_link(url):
     page = ui.render_home(url)
     assert "Source code and demo video" not in page and "javascript:" not in page
